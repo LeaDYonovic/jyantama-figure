@@ -28,6 +28,9 @@ dry_run: false
 # 是否保存分析结果页面的截图 (举报时有用)
 save_screenshot: true
 
+# 是否保存 Mortal 分析结果页面到本地 HTML
+save_local_paipu: false
+
 # 导出格式，可选 "xlsx" 或 "csv" (默认: "xlsx")
 output: "xlsx"
 

@@ -36,6 +36,7 @@ limit: 10
 modes: "12"
 headless: true
 save_screenshot: true
+save_local_paipu: false
 output: "xlsx"
 ```
 
@@ -81,6 +82,7 @@ python main.py -p 言乾 --modes 12 --limit 1 --headless --save-screenshot --out
 | `--output` | `xlsx` | 导出格式，可选 `xlsx` 或 `csv`（默认xlsx） |
 | `--plot` | `none` | 生成折线图：`none`, `html`, `png`, 或 `both`。默认不生成 |
 | `--save-screenshot` | `False` | 保存分析结果页面截图（举报时可用） |
+| `--save-local-paipu` | `False` | 保存每条 Mortal 分析结果页的本地 HTML，并在结果文件中记录路径 |
 
 ### Advanced Submission Options (高级配置)
 | 参数 | 默认值 | 说明 |
@@ -143,6 +145,7 @@ results/<nickname>/
 - `results/<nickname>/results.xlsx` 或 `results/<nickname>/results.csv`
 - `results/<nickname>/mode_<id>/<uuid>.png`
 - `results/<nickname>/mode_<id>/<uuid>_error.png`
+- `results/<nickname>/mode_<id>/<uuid>.html`
 
 ## 日志
 
@@ -152,6 +155,7 @@ results/<nickname>/
 
 - `xlsx` 写入逻辑已做批量化优化，但整体耗时通常主要由浏览器提交、Cloudflare Turnstile 和远端分析生成决定。
 - `--badmove` 只会在新分析的牌谱中统计恶手率；已经成功写入结果文件的牌谱会继续跳过，不会为了补恶手率自动重跑。
+- `--save-local-paipu` 只会保存新分析的结果页；已经成功写入结果文件的牌谱会继续跳过，不会为了补本地 HTML 自动重跑。
 - 在只有一个系统代理的情况下，多窗口或多线程通常不会线性提速。
 
 ## 下一步

@@ -340,6 +340,8 @@ class BrowserAutomator:
 
         os.makedirs(output_dir, exist_ok=True)
         screenshot_path = os.path.join(output_dir, f"{uuid}.png")
+        local_paipu_path = os.path.join(output_dir, f"{uuid}.html")
+        save_local_paipu = task.get("save_local_paipu", False)
         token_wait_seconds = 0.0
         submit_wait_seconds = 0.0
         result_wait_seconds = 0.0
@@ -400,8 +402,18 @@ class BrowserAutomator:
                 saved_screenshot_path = screenshot_path
                 logging.info(f"{log_prefix} Screenshot saved to {screenshot_path}")
 
+            saved_local_paipu_path = ""
+            if save_local_paipu:
+                saved_local_paipu_path = self._save_local_paipu(
+                    sb,
+                    local_paipu_path,
+                    result_url,
+                    log_prefix,
+                )
+
             return {
                 "resultUrl": result_url,
+                "localPaipuPath": saved_local_paipu_path,
                 "screenshotPath": saved_screenshot_path,
                 "metadata": metadata,
                 "badMoveStats": bad_move_stats,
@@ -512,7 +524,9 @@ class BrowserAutomator:
         uuid = task["uuid"]
         log_prefix = task.get("log_prefix", f"[{uuid}]")
         screenshot_path = os.path.join(task["mode_dir"], f"{uuid}.png")
+        local_paipu_path = os.path.join(task["mode_dir"], f"{uuid}.html")
         save_screenshot = task.get("save_screenshot", False)
+        save_local_paipu = task.get("save_local_paipu", False)
 
         logging.info(f"{log_prefix} Waiting for result page")
         self._wait_for_result_or_error(sb, log_prefix, timeout=45)
@@ -532,8 +546,18 @@ class BrowserAutomator:
             saved_screenshot_path = screenshot_path
             logging.info(f"{log_prefix} Screenshot saved to {screenshot_path}")
 
+        saved_local_paipu_path = ""
+        if save_local_paipu:
+            saved_local_paipu_path = self._save_local_paipu(
+                sb,
+                local_paipu_path,
+                result_url,
+                log_prefix,
+            )
+
         return {
             "resultUrl": result_url,
+            "localPaipuPath": saved_local_paipu_path,
             "screenshotPath": saved_screenshot_path,
             "metadata": metadata,
             "badMoveStats": bad_move_stats,
@@ -899,6 +923,48 @@ class BrowserAutomator:
             """
         )
         return metadata or {}
+
+    def _save_local_paipu(self, sb, filepath, source_url, log_prefix):
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        html = sb.execute_script(
+            """
+            const sourceUrl = arguments[0];
+            const clone = document.documentElement.cloneNode(true);
+            const absolutize = (selector, attr) => {
+              for (const el of clone.querySelectorAll(selector)) {
+                const value = el.getAttribute(attr);
+                if (!value || value.startsWith('#') || value.startsWith('data:') || value.startsWith('blob:')) {
+                  continue;
+                }
+                try {
+                  el.setAttribute(attr, new URL(value, document.baseURI).href);
+                } catch (e) {
+                }
+              }
+            };
+
+            absolutize('a[href]', 'href');
+            absolutize('link[href]', 'href');
+            absolutize('script[src]', 'src');
+            absolutize('img[src]', 'src');
+            absolutize('iframe[src]', 'src');
+
+            const meta = clone.ownerDocument.createElement('meta');
+            meta.setAttribute('name', 'batchmortal-source-url');
+            meta.setAttribute('content', sourceUrl);
+            const head = clone.querySelector('head');
+            if (head) {
+              head.insertBefore(meta, head.firstChild);
+            }
+
+            return `<!doctype html>\\n<!-- Saved from ${sourceUrl} -->\\n${clone.outerHTML}`;
+            """,
+            source_url,
+        )
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(html or "")
+        logging.info(f"{log_prefix} Local paipu saved to {filepath}")
+        return filepath
 
     def _extract_bad_move_stats(self, sb, log_prefix):
         try:

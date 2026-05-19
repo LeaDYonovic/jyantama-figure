@@ -12,6 +12,7 @@ CSV_COLUMNS = [
     "startTime",
     "endTime",
     "resultUrl",
+    "localPaipuPath",
     "modelTag",
     "rating",
     "aiConsistencyRate",

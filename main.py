@@ -107,6 +107,14 @@ def parse_args():
     output_group.add_argument(
         "--plot-limit", "--plot_limit", type=int, default=config.get("plot_limit"), help="Only use the latest N records for chart (default: all)", dest="plot_limit"
     )
+    save_local_paipu_default = bool(config.get("save_local_paipu", False))
+    output_group.add_argument(
+        "--save-local-paipu", "--save_local_paipu",
+        action="store_true",
+        default=save_local_paipu_default,
+        help="Save a local HTML copy of each Mortal result page",
+        dest="save_local_paipu"
+    )
     save_screenshot_default = config.get("save_screenshot", False)
     output_group.add_argument(
         "--save-screenshot", "--save_screenshot",
@@ -234,6 +242,7 @@ def print_summary(args, modes):
     log_line(f"  DryRun:    {args.dry_run}")
     log_line(f"  Retry:     {args.retry}")
     log_line(f"  BadMove:   {args.analyze_bad_move_rate}")
+    log_line(f"  SaveLocal: {args.save_local_paipu}")
     log_line("=============================")
 
 
@@ -343,6 +352,7 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: 
             {
                 **base_row,
                 "resultUrl": result["resultUrl"],
+                "localPaipuPath": result.get("localPaipuPath", ""),
                 "modelTag": parsed.get("modelTag") or args.model_tag,
                 "rating": rating_value if rating_value is not None else "",
                 "aiConsistencyRate": parsed.get("aiConsistencyRate", ""),
@@ -408,6 +418,7 @@ def run_parallel_analysis(
     for task in tasks:
         task["model_tag"] = args.model_tag
         task["save_screenshot"] = args.save_screenshot
+        task["save_local_paipu"] = args.save_local_paipu
         task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
     log_line("[Serial] Starting analysis with 1 persistent browser")
 
@@ -458,6 +469,7 @@ def run_controlled_pipeline_analysis(
     for task in tasks:
         task["model_tag"] = args.model_tag
         task["save_screenshot"] = args.save_screenshot
+        task["save_local_paipu"] = args.save_local_paipu
         task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
 
     log_line("[Alternate] Starting two-window alternating review flow")
