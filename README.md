@@ -67,6 +67,7 @@ python main.py -p 言乾 --modes 12 --limit 1 --headless --save-screenshot --out
 | `--modes` | `9` | 逗号分隔的 mode 列表，例如 `9（四人金南）,12（四人玉南）,16（四人王座南）` |
 | `--model-tag` | `4.1b` | Mortal 分析模型版本 |
 | `--retry` | `3` | 失败条目的重试次数。每次重试都会重新打开分析页并重新提交 |
+| `--badmove` | `False` | 额外统计恶手率。开启后会在日志和结果文件中写入 5% 与 10% 两档恶手率 |
 
 ### Browser & Network Options (浏览器与网络)
 | 参数 | 默认值 | 说明 |
@@ -123,7 +124,7 @@ python main.py -p 言乾 --limit 10 --modes 16 --headless --prewarm-standby
 
 示例：
 ```bash
-python main.py -p "main()" --limit 20 --modes 16 --headless --retry 3 --prewarm-standby --save-screenshot --plot both
+python main.py -p "main()" --limit 20 --modes 16 --headless --retry 3 --badmove --prewarm-standby --save-screenshot --plot both
 ```
 
 ![report_main__](assets/report_main__.png)
@@ -150,6 +151,7 @@ results/<nickname>/
 ## 说明
 
 - `xlsx` 写入逻辑已做批量化优化，但整体耗时通常主要由浏览器提交、Cloudflare Turnstile 和远端分析生成决定。
+- `--badmove` 只会在新分析的牌谱中统计恶手率；已经成功写入结果文件的牌谱会继续跳过，不会为了补恶手率自动重跑。
 - 在只有一个系统代理的情况下，多窗口或多线程通常不会线性提速。
 
 ## 下一步

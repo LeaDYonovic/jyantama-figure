@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from batchmortal.api import build_paipu_urls, get_player_records, search_player, get_player_nickname_by_id
 from batchmortal.browser import BrowserAutomator, ReviewSubmissionCoordinator
-from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids
+from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids, read_result_rows
 from batchmortal.visualize import plot_results
 from seleniumbase import SB
 from batchmortal.config import load_config
@@ -72,6 +72,14 @@ def parse_args():
     )
     analysis_group.add_argument(
         "--retry", type=int, default=config.get("retry", 3), help="Retry failed review items this many times"
+    )
+    analyze_bad_move_rate_default = bool(config.get("analyze_bad_move_rate", False))
+    analysis_group.add_argument(
+        "--badmove",
+        action="store_true",
+        default=analyze_bad_move_rate_default,
+        help="Analyze bad move rate from the Mortal result page",
+        dest="analyze_bad_move_rate"
     )
 
     # -- Browser / Network Options --
@@ -225,10 +233,89 @@ def print_summary(args, modes):
     log_line(f"  Headless:  {args.headless}")
     log_line(f"  DryRun:    {args.dry_run}")
     log_line(f"  Retry:     {args.retry}")
+    log_line(f"  BadMove:   {args.analyze_bad_move_rate}")
     log_line("=============================")
 
 
-def consume_result_event(args, writer: ResultWriter, result_event: dict) -> tuple[int, int]:
+def parse_float(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def create_analysis_stats() -> dict:
+    return {
+        "rating_sum": 0.0,
+        "rating_count": 0,
+        "ai_rate_sum": 0.0,
+        "ai_rate_count": 0,
+        "bad_move_5_sum": 0.0,
+        "bad_move_5_count": 0,
+        "bad_move_10_sum": 0.0,
+        "bad_move_10_count": 0,
+    }
+
+
+def add_average_sample(stats: dict, prefix: str, value):
+    parsed = parse_float(value)
+    if parsed is None:
+        return
+    stats[f"{prefix}_sum"] += parsed
+    stats[f"{prefix}_count"] += 1
+
+
+def format_average(stats: dict, prefix: str, suffix: str = "") -> str:
+    count = stats.get(f"{prefix}_count", 0)
+    if not count:
+        return "N/A"
+    return f"{stats[f'{prefix}_sum'] / count:.3f}{suffix}"
+
+
+def log_final_averages(args, stats: dict):
+    log_line(f"  AvgRating: {format_average(stats, 'rating')}")
+    log_line(f"  AvgMatch:  {format_average(stats, 'ai_rate', '%')}")
+    if args.analyze_bad_move_rate:
+        log_line(f"  AvgBadMove5:  {format_average(stats, 'bad_move_5', '%')}")
+        log_line(f"  AvgBadMove10: {format_average(stats, 'bad_move_10', '%')}")
+
+
+def add_result_row_to_stats(stats: dict, row: dict, include_bad_move: bool):
+    if str(row.get("rating", "")).strip() == "ERROR":
+        return
+
+    add_average_sample(stats, "rating", row.get("rating", ""))
+    add_average_sample(stats, "ai_rate", row.get("aiConsistencyRate", ""))
+    if include_bad_move:
+        add_average_sample(stats, "bad_move_5", row.get("badMoveRate5", ""))
+        add_average_sample(stats, "bad_move_10", row.get("badMoveRate10", ""))
+
+
+def create_analysis_stats_from_rows(rows: list[dict], include_bad_move: bool) -> dict:
+    stats = create_analysis_stats()
+    for row in rows:
+        add_result_row_to_stats(stats, row, include_bad_move)
+    return stats
+
+
+def load_final_analysis_stats(out_path: str, output_format: str, include_bad_move: bool) -> dict | None:
+    try:
+        rows = read_result_rows(out_path, output_format)
+    except Exception as exc:
+        logging.warning(f"Failed to read final result stats from {out_path}: {exc}")
+        return None
+
+    return create_analysis_stats_from_rows(rows, include_bad_move)
+
+
+def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: dict | None = None) -> tuple[int, int]:
     task = result_event["task"]
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     base_row = {
@@ -244,12 +331,20 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict) -> tupl
     if result_event["status"] == "success":
         result = result_event["result"]
         parsed = parse_metadata(result["metadata"])
+        bad_move_stats = result.get("badMoveStats") or {}
+        rating_value = parse_float(parsed.get("rating", ""))
+        if stats is not None:
+            add_average_sample(stats, "rating", rating_value)
+            add_average_sample(stats, "ai_rate", parsed.get("aiConsistencyRate", ""))
+            if args.analyze_bad_move_rate:
+                add_average_sample(stats, "bad_move_5", bad_move_stats.get("badMoveRate5", ""))
+                add_average_sample(stats, "bad_move_10", bad_move_stats.get("badMoveRate10", ""))
         writer.write_row(
             {
                 **base_row,
                 "resultUrl": result["resultUrl"],
                 "modelTag": parsed.get("modelTag") or args.model_tag,
-                "rating": parsed.get("rating", ""),
+                "rating": rating_value if rating_value is not None else "",
                 "aiConsistencyRate": parsed.get("aiConsistencyRate", ""),
                 "aiConsistencyNumerator": parsed.get("aiConsistencyNumerator", ""),
                 "aiConsistencyDenominator": parsed.get("aiConsistencyDenominator", ""),
@@ -258,13 +353,34 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict) -> tupl
                 "playerId": parsed.get("playerId", ""),
                 "reviewDuration": parsed.get("reviewDuration", ""),
                 "screenshotPath": result.get("screenshotPath", ""),
+                "badMoveRate5": bad_move_stats.get("badMoveRate5", ""),
+                "badMoveCount5": bad_move_stats.get("badMoveCount5", ""),
+                "badMoveRate10": bad_move_stats.get("badMoveRate10", ""),
+                "badMoveCount10": bad_move_stats.get("badMoveCount10", ""),
+                "badMoveDenominator": bad_move_stats.get("badMoveDenominator", ""),
             }
         )
-        log_line(
+        message = (
             f"{task['log_prefix']} OK "
             f"rating={parsed.get('rating', 'N/A')} "
             f"match={parsed.get('aiConsistencyRate', 'N/A')}"
         )
+        if args.analyze_bad_move_rate:
+            bad_move_denominator = bad_move_stats.get("badMoveDenominator", "")
+            bad_move_5 = (
+                f"{bad_move_stats.get('badMoveCount5', '')}/{bad_move_denominator}="
+                f"{bad_move_stats.get('badMoveRate5', '')}"
+                if bad_move_denominator
+                else "N/A"
+            )
+            bad_move_10 = (
+                f"{bad_move_stats.get('badMoveCount10', '')}/{bad_move_denominator}="
+                f"{bad_move_stats.get('badMoveRate10', '')}"
+                if bad_move_denominator
+                else "N/A"
+            )
+            message += f" badMove5={bad_move_5} badMove10={bad_move_10}"
+        log_line(message)
         return 1, 0
 
     writer.write_row(
@@ -283,6 +399,7 @@ def run_parallel_analysis(
     tasks: list[dict],
     out_path: str,
     automator: BrowserAutomator,
+    stats: dict | None = None,
 ) -> tuple[int, int]:
     total_processed = 0
     total_failed = 0
@@ -291,6 +408,7 @@ def run_parallel_analysis(
     for task in tasks:
         task["model_tag"] = args.model_tag
         task["save_screenshot"] = args.save_screenshot
+        task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
     log_line("[Serial] Starting analysis with 1 persistent browser")
 
     try:
@@ -317,7 +435,7 @@ def run_parallel_analysis(
                         result_event = {"status": "fail", "task": task}
                         break
 
-                succeeded, failed = consume_result_event(args, writer, result_event)
+                succeeded, failed = consume_result_event(args, writer, result_event, stats)
                 total_processed += succeeded
                 total_failed += failed
     finally:
@@ -326,7 +444,13 @@ def run_parallel_analysis(
     return total_processed, total_failed
 
 
-def run_controlled_pipeline_analysis(args, tasks: list[dict], out_path: str, automator: BrowserAutomator) -> tuple[int, int]:
+def run_controlled_pipeline_analysis(
+    args,
+    tasks: list[dict],
+    out_path: str,
+    automator: BrowserAutomator,
+    stats: dict | None = None,
+) -> tuple[int, int]:
     total_processed = 0
     total_failed = 0
     writer = ResultWriter(out_path, args.output)
@@ -334,12 +458,13 @@ def run_controlled_pipeline_analysis(args, tasks: list[dict], out_path: str, aut
     for task in tasks:
         task["model_tag"] = args.model_tag
         task["save_screenshot"] = args.save_screenshot
+        task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
 
     log_line("[Alternate] Starting two-window alternating review flow")
 
     try:
         for result_event in automator.iter_alternating_windows(tasks, max_retries=args.retry):
-            succeeded, failed = consume_result_event(args, writer, result_event)
+            succeeded, failed = consume_result_event(args, writer, result_event, stats)
             total_processed += succeeded
             total_failed += failed
     finally:
@@ -403,6 +528,7 @@ def main():
     tasks = collect_tasks(account_id, modes, args.limit, output_root, processed_uuids)
     total_processed = 0
     total_failed = 0
+    analysis_stats = create_analysis_stats()
 
     if args.dry_run:
         for task in tasks:
@@ -416,7 +542,7 @@ def main():
                 submission_coordinator=None,
                 controlled_submission=False,
             )
-            total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator)
+            total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator, analysis_stats)
         elif args.prewarm_standby and len(tasks) >= 2:
             submission_coordinator = ReviewSubmissionCoordinator(
                 base_interval=min(args.submit_interval, 1.0),
@@ -428,7 +554,7 @@ def main():
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
-            total_processed, total_failed = run_controlled_pipeline_analysis(args, tasks, out_path, automator)
+            total_processed, total_failed = run_controlled_pipeline_analysis(args, tasks, out_path, automator, analysis_stats)
         else:
             submission_coordinator = ReviewSubmissionCoordinator(
                 base_interval=args.submit_interval,
@@ -440,12 +566,17 @@ def main():
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
-            total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator)
+            total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator, analysis_stats)
 
     elapsed = time.time() - start_time
+    final_stats = analysis_stats
+    if not args.dry_run:
+        final_stats = load_final_analysis_stats(out_path, args.output, args.analyze_bad_move_rate) or analysis_stats
+
     log_line("=== Done ===")
     log_line(f"  Succeeded: {total_processed}")
     log_line(f"  Failed:    {total_failed}")
+    log_final_averages(args, final_stats)
     log_line(f"  Time:      {elapsed:.2f}s")
     if not args.dry_run:
         log_line(f"  Output:    {out_path}")

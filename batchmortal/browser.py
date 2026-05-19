@@ -14,6 +14,8 @@ FORM_SELECTOR = 'form[name="reviewForm"]'
 TURNSTILE_RESPONSE_SELECTOR = 'input[name="cf-turnstile-response"]'
 RESULT_SELECTOR = "details > dl"
 REPORT_URL_FRAGMENT = "/report/"
+BAD_MOVE_STRICT_LIMIT = 5
+BAD_MOVE_LOOSE_LIMIT = 10
 
 
 class ReviewSubmissionCoordinator:
@@ -376,6 +378,9 @@ class BrowserAutomator:
             result_wait_seconds = time.perf_counter() - result_started_at
             result_url = sb.get_current_url()
             metadata = self._extract_metadata(sb)
+            bad_move_stats = {}
+            if task.get("analyze_bad_move_rate", False):
+                bad_move_stats = self._extract_bad_move_stats(sb, log_prefix)
             if self.submission_coordinator is not None:
                 self.submission_coordinator.report_outcome(
                     log_prefix,
@@ -399,6 +404,7 @@ class BrowserAutomator:
                 "resultUrl": result_url,
                 "screenshotPath": saved_screenshot_path,
                 "metadata": metadata,
+                "badMoveStats": bad_move_stats,
             }
         except Exception as exc:
             if self.submission_coordinator is not None:
@@ -512,6 +518,9 @@ class BrowserAutomator:
         self._wait_for_result_or_error(sb, log_prefix, timeout=45)
         result_url = sb.get_current_url()
         metadata = self._extract_metadata(sb)
+        bad_move_stats = {}
+        if task.get("analyze_bad_move_rate", False):
+            bad_move_stats = self._extract_bad_move_stats(sb, log_prefix)
 
         total_elapsed = time.perf_counter() - slot["started_at"] if slot["started_at"] else 0.0
         logging.info(f"{log_prefix} Result ready in {total_elapsed:.1f}s: {result_url}")
@@ -527,6 +536,7 @@ class BrowserAutomator:
             "resultUrl": result_url,
             "screenshotPath": saved_screenshot_path,
             "metadata": metadata,
+            "badMoveStats": bad_move_stats,
         }
 
     def _handle_pipeline_failure(self, sb, slot, task, exc, max_retries, pending):
@@ -889,6 +899,113 @@ class BrowserAutomator:
             """
         )
         return metadata or {}
+
+    def _extract_bad_move_stats(self, sb, log_prefix):
+        try:
+            stats = sb.execute_script(
+                """
+                const strictLimit = arguments[0];
+                const looseLimit = arguments[1];
+
+                const parseFirstNumber = (text) => {
+                  const match = String(text || '').replace(',', '.').match(/-?\\d+(?:\\.\\d+)?/);
+                  return match ? Number.parseFloat(match[0]) : NaN;
+                };
+
+                const parseFirstInteger = (text) => {
+                  const match = String(text || '').match(/\\d+/);
+                  return match ? Number.parseInt(match[0], 10) : NaN;
+                };
+
+                const extractTotalChoices = () => {
+                  for (const dl of document.querySelectorAll('details > dl')) {
+                    const dts = dl.querySelectorAll('dt');
+                    const dds = dl.querySelectorAll('dd');
+                    const count = Math.min(dts.length, dds.length);
+                    for (let i = 0; i < count; i += 1) {
+                      const key = dts[i].textContent.trim().toLowerCase();
+                      if (!key.includes('一致率') && !key.includes('match')) {
+                        continue;
+                      }
+                      const match = dds[i].textContent.match(/\\d+\\s*\\/\\s*(\\d+)/);
+                      if (match) {
+                        return Number.parseInt(match[1], 10);
+                      }
+                    }
+                  }
+                  return null;
+                };
+
+                const extractChosenWeight = (orderLoss) => {
+                  const chosenIndex = parseFirstInteger(orderLoss.textContent);
+                  if (!Number.isFinite(chosenIndex) || chosenIndex < 1) {
+                    return NaN;
+                  }
+
+                  let collapseEntry = orderLoss.closest('.collapse.entry');
+                  if (!collapseEntry) {
+                    const turnInfo = orderLoss.parentElement;
+                    const summary = turnInfo ? turnInfo.parentElement : null;
+                    collapseEntry = summary ? summary.parentElement : null;
+                  }
+                  if (!collapseEntry) {
+                    return NaN;
+                  }
+
+                  const rows = collapseEntry.querySelectorAll('table tbody tr');
+                  const chosenRow = rows[chosenIndex - 1];
+                  if (!chosenRow) {
+                    return NaN;
+                  }
+
+                  const cells = chosenRow.querySelectorAll('td, th');
+                  const weightCell = cells.length ? cells[cells.length - 1] : chosenRow.lastElementChild;
+                  return weightCell ? parseFirstNumber(weightCell.textContent) : NaN;
+                };
+
+                let countStrict = 0;
+                let countLoose = 0;
+                let unparsed = 0;
+                const orderLosses = Array.from(document.getElementsByClassName('order-loss'));
+
+                for (const orderLoss of orderLosses) {
+                  const chosenWeight = extractChosenWeight(orderLoss);
+                  if (!Number.isFinite(chosenWeight)) {
+                    unparsed += 1;
+                    continue;
+                  }
+                  if (chosenWeight <= strictLimit) {
+                    countStrict += 1;
+                  }
+                  if (chosenWeight <= looseLimit) {
+                    countLoose += 1;
+                  }
+                }
+
+                const totalChoices = extractTotalChoices();
+                const formatRate = (count) => (
+                  Number.isFinite(totalChoices) && totalChoices > 0
+                    ? `${(100 * count / totalChoices).toFixed(3)}%`
+                    : ''
+                );
+
+                return {
+                  badMoveRate5: formatRate(countStrict),
+                  badMoveCount5: String(countStrict),
+                  badMoveRate10: formatRate(countLoose),
+                  badMoveCount10: String(countLoose),
+                  badMoveDenominator: Number.isFinite(totalChoices) ? String(totalChoices) : '',
+                  badMoveOrderLossCount: String(orderLosses.length),
+                  badMoveUnparsedCount: String(unparsed),
+                };
+                """,
+                BAD_MOVE_STRICT_LIMIT,
+                BAD_MOVE_LOOSE_LIMIT,
+            )
+            return stats or {}
+        except Exception as exc:
+            logging.warning(f"{log_prefix} Could not extract bad move stats: {exc}")
+            return {}
 
     def _wait_for_result_or_error(self, sb, log_prefix, timeout):
         deadline = time.time() + timeout

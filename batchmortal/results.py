@@ -23,6 +23,11 @@ CSV_COLUMNS = [
     "reviewDuration",
     "screenshotPath",
     "timestamp",
+    "badMoveRate5",
+    "badMoveCount5",
+    "badMoveRate10",
+    "badMoveCount10",
+    "badMoveDenominator",
 ]
 
 
@@ -78,10 +83,14 @@ class ResultWriter:
         self._csv_writer = None
         self._workbook = None
         self._worksheet = None
+        self._headers = []
+        self._column_to_index = {}
 
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         if output_format == "csv":
+            if not self.is_new:
+                self._migrate_csv_headers()
             self._file = open(filepath, mode="a", newline="", encoding="utf-8")
             self._csv_writer = csv.writer(self._file)
             if self.is_new:
@@ -93,6 +102,7 @@ class ResultWriter:
                 self._worksheet = self._workbook.active
                 self._worksheet.append(CSV_COLUMNS)
                 self._uuid_to_row = {}
+                self._set_xlsx_headers(CSV_COLUMNS)
             else:
                 self._workbook = openpyxl.load_workbook(filepath)
                 self._worksheet = self._workbook.active
@@ -106,8 +116,54 @@ class ResultWriter:
                             uuid_idx = headers.index("uuid")
                             if len(row) > uuid_idx and row[uuid_idx]:
                                 self._uuid_to_row[str(row[uuid_idx]).strip()] = idx
+                if self._ensure_xlsx_headers(headers):
+                    self._pending_rows += 1
+                self._set_xlsx_headers(headers)
         else:
             raise ValueError(f"Unsupported output format: {output_format}")
+
+    def _migrate_csv_headers(self):
+        try:
+            with open(self.filepath, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames == CSV_COLUMNS:
+                    return
+                rows = list(reader)
+
+            with open(self.filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(CSV_COLUMNS)
+                for row in rows:
+                    writer.writerow([row.get(column, "") for column in CSV_COLUMNS])
+        except Exception as exc:
+            raise RuntimeError(f"Failed to migrate CSV headers for {self.filepath}: {exc}") from exc
+
+    def _ensure_xlsx_headers(self, headers: list[str]) -> bool:
+        existing = set(headers)
+        changed = False
+        next_col = len(headers) + 1
+        for column in CSV_COLUMNS:
+            if column in existing:
+                continue
+            self._worksheet.cell(row=1, column=next_col, value=column)
+            existing.add(column)
+            headers.append(column)
+            next_col += 1
+            changed = True
+        return changed
+
+    def _set_xlsx_headers(self, headers: list[str]):
+        self._headers = headers
+        self._column_to_index = {
+            column: idx
+            for idx, column in enumerate(headers, start=1)
+            if column
+        }
+
+    def _write_xlsx_row(self, row_idx: int, row: dict):
+        for column in CSV_COLUMNS:
+            col_idx = self._column_to_index[column]
+            self._worksheet.cell(row=row_idx, column=col_idx, value=row.get(column, ""))
 
     def write_row(self, row: dict):
         safe_row = [row.get(column, "") for column in CSV_COLUMNS]
@@ -122,12 +178,12 @@ class ResultWriter:
         uuid_val = str(row.get("uuid", "")).strip()
         if uuid_val and hasattr(self, "_uuid_to_row") and uuid_val in self._uuid_to_row:
             row_idx = self._uuid_to_row[uuid_val]
-            for col_idx, val in enumerate(safe_row, start=1):
-                self._worksheet.cell(row=row_idx, column=col_idx, value=val)
+            self._write_xlsx_row(row_idx, row)
         else:
-            self._worksheet.append(safe_row)
+            row_idx = self._worksheet.max_row + 1
+            self._write_xlsx_row(row_idx, row)
             if uuid_val and hasattr(self, "_uuid_to_row"):
-                self._uuid_to_row[uuid_val] = self._worksheet.max_row
+                self._uuid_to_row[uuid_val] = row_idx
 
         self._pending_rows += 1
         if self._pending_rows >= self.flush_every:
@@ -170,6 +226,38 @@ def append_row(filepath: str, row: dict, output_format: str = "csv"):
     """
     with ResultWriter(filepath, output_format=output_format, flush_every=1) as writer:
         writer.write_row(row)
+
+
+def read_result_rows(filepath: str, output_format: str = "xlsx") -> list[dict]:
+    if not os.path.exists(filepath):
+        return []
+
+    if output_format == "csv":
+        with open(filepath, "r", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    if output_format == "xlsx":
+        wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+        try:
+            ws = wb.active
+            rows = iter(ws.rows)
+            first_row = next(rows, None)
+            if first_row is None:
+                return []
+
+            headers = [str(cell.value) if cell.value is not None else "" for cell in first_row]
+            result_rows = []
+            for row in rows:
+                record = {}
+                for idx, cell in enumerate(row):
+                    if idx < len(headers) and headers[idx]:
+                        record[headers[idx]] = cell.value if cell.value is not None else ""
+                result_rows.append(record)
+            return result_rows
+        finally:
+            wb.close()
+
+    raise ValueError(f"Unsupported output format: {output_format}")
 
 
 def get_processed_uuids(filepath: str, output_format: str = "xlsx") -> set[str]:

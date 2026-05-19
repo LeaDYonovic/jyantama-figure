@@ -16,6 +16,9 @@ modes: "12"
 # Mortal 分析模型版本 (默认: "4.1b")
 model_tag: "4.1b"
 
+# 是否额外分析恶手率。默认关闭，开启后会统计 5% 和 10% 两档恶手率
+analyze_bad_move_rate: false
+
 # 是否在后台以无头模式运行浏览器 (强烈推荐 true)
 headless: true
 
