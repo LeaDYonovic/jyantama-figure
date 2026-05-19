@@ -109,7 +109,7 @@ def parse_args():
     )
     save_local_paipu_default = bool(config.get("save_local_paipu", False))
     output_group.add_argument(
-        "--save-local-paipu", "--save_local_paipu",
+        "--save-local",
         action="store_true",
         default=save_local_paipu_default,
         help="Save a local HTML copy of each Mortal result page",
