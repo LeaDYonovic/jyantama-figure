@@ -7,7 +7,35 @@ from collections import deque
 
 from seleniumbase import SB
 
-REVIEW_URL = "https://mjai.ekyu.moe/zh-cn.html"
+REVIEW_BASE_URL = "https://mjai.ekyu.moe"
+DEFAULT_REVIEW_LANGUAGE = "zh-CN"
+
+# Mirrors the reviewer form field `select[name="lang"]`.
+# Supported values on mjai.ekyu.moe are:
+#   zh-CN -> Simplified Chinese, page /zh-cn.html
+#   en    -> English, page /
+#   ja    -> Japanese, page /ja.html
+#   ko    -> Korean, page /ko.html
+REVIEW_LANGUAGE_URL_PATHS = {
+    "zh-CN": "/zh-cn.html",
+    "en": "/",
+    "ja": "/ja.html",
+    "ko": "/ko.html",
+}
+REVIEW_LANGUAGE_ALIASES = {
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+    "zh_cn": "zh-CN",
+    "cn": "zh-CN",
+    "en-us": "en",
+    "english": "en",
+    "jp": "ja",
+    "ja-jp": "ja",
+    "japanese": "ja",
+    "kr": "ko",
+    "ko-kr": "ko",
+    "korean": "ko",
+}
 INPUT_SELECTOR = 'input[name="log-url"]'
 SUBMIT_SELECTOR = 'button[name="submitBtn"]'
 FORM_SELECTOR = 'form[name="reviewForm"]'
@@ -16,6 +44,29 @@ RESULT_SELECTOR = "details > dl"
 REPORT_URL_FRAGMENT = "/report/"
 BAD_MOVE_STRICT_LIMIT = 5
 BAD_MOVE_LOOSE_LIMIT = 10
+
+
+def normalize_review_language(language):
+    if language is None:
+        return DEFAULT_REVIEW_LANGUAGE
+
+    text = str(language).strip()
+    if not text:
+        return DEFAULT_REVIEW_LANGUAGE
+    if text in REVIEW_LANGUAGE_URL_PATHS:
+        return text
+
+    normalized = text.lower().replace("_", "-")
+    if normalized in REVIEW_LANGUAGE_ALIASES:
+        return REVIEW_LANGUAGE_ALIASES[normalized]
+
+    supported = ", ".join(REVIEW_LANGUAGE_URL_PATHS)
+    raise ValueError(f"Unsupported review language '{language}'. Supported values: {supported}")
+
+
+def build_review_url(language):
+    normalized_language = normalize_review_language(language)
+    return f"{REVIEW_BASE_URL}{REVIEW_LANGUAGE_URL_PATHS[normalized_language]}"
 
 
 class ReviewSubmissionCoordinator:
@@ -120,9 +171,18 @@ class ReviewSubmissionCoordinator:
 
 
 class BrowserAutomator:
-    def __init__(self, headless=True, proxy=None, submission_coordinator=None, controlled_submission=True):
+    def __init__(
+        self,
+        headless=True,
+        proxy=None,
+        submission_coordinator=None,
+        controlled_submission=True,
+        review_language=DEFAULT_REVIEW_LANGUAGE,
+    ):
         self.headless = headless
         self.proxy = proxy
+        self.review_language = normalize_review_language(review_language)
+        self.review_url = build_review_url(self.review_language)
         self.controlled_submission = controlled_submission
         if controlled_submission:
             self.submission_coordinator = submission_coordinator or ReviewSubmissionCoordinator()
@@ -674,7 +734,7 @@ class BrowserAutomator:
         logging.info(f"{label} Spawning {slot['name']} from the active review context")
 
         try:
-            sb.execute_script("window.open(arguments[0], '_blank');", REVIEW_URL)
+            sb.execute_script("window.open(arguments[0], '_blank');", self.review_url)
         except Exception:
             sb.driver.switch_to.new_window("window")
             slot["handle"] = sb.driver.current_window_handle
@@ -712,11 +772,11 @@ class BrowserAutomator:
 
             try:
                 if "mjai.ekyu.moe" in current_url:
-                    sb.execute_script("window.location.replace(arguments[0]);", REVIEW_URL)
+                    sb.execute_script("window.location.replace(arguments[0]);", self.review_url)
                 else:
-                    sb.uc_open_with_reconnect(REVIEW_URL, reconnect_time=2)
+                    sb.uc_open_with_reconnect(self.review_url, reconnect_time=2)
             except Exception:
-                sb.open(REVIEW_URL)
+                sb.open(self.review_url)
 
             try:
                 sb.wait_for_ready_state_complete()
@@ -731,7 +791,7 @@ class BrowserAutomator:
                 if attempt == 0:
                     logging.warning(f"{label} Review page not ready, retrying open once...")
                     try:
-                        sb.execute_script("window.location.replace(arguments[0]);", REVIEW_URL)
+                        sb.execute_script("window.location.replace(arguments[0]);", self.review_url)
                     except Exception:
                         try:
                             sb.refresh()
@@ -765,6 +825,7 @@ class BrowserAutomator:
             """
             const paipuUrl = arguments[0];
             const modelTag = arguments[1];
+            const reviewLanguage = arguments[2];
 
             const dispatch = (el) => {
               el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -797,6 +858,7 @@ class BrowserAutomator:
             setSelect('select[name="engine"]', 'mortal');
             setSelect('select[name="mortal-model-tag"]', modelTag);
             setSelect('select[name="ui"]', 'classic');
+            setSelect('select[name="lang"]', reviewLanguage);
 
             const details = document.querySelector('details.details.mb-3');
             if (details) {
@@ -808,7 +870,7 @@ class BrowserAutomator:
               showRating.click();
             }
 
-            const form = document.querySelector(arguments[2]);
+            const form = document.querySelector(arguments[3]);
             if (form) {
               form.target = '_self';
             }
@@ -817,6 +879,7 @@ class BrowserAutomator:
             """,
             paipu_url,
             model_tag,
+            self.review_language,
             FORM_SELECTOR,
         )
 
@@ -894,7 +957,7 @@ class BrowserAutomator:
             current_url = state["url"]
             page_text = state["page_text"]
 
-            if REPORT_URL_FRAGMENT in current_url and current_url != REVIEW_URL:
+            if REPORT_URL_FRAGMENT in current_url and current_url != self.review_url:
                 return
 
             if "invalid captcha response" in page_text or "timeout-or-duplicate" in page_text:

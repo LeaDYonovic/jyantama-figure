@@ -34,6 +34,7 @@ python main.py -a <数字账号ID> [选项]
 nickname: "言乾"
 limit: 10
 modes: "12"
+review_language: "zh-CN"
 headless: true
 save_screenshot: true
 save_local_paipu: false
@@ -67,6 +68,7 @@ python main.py -p 言乾 --modes 12 --limit 1 --headless --save-screenshot --out
 | `--limit` | `10` | 每个 mode 最多拉取多少条记录 |
 | `--modes` | `9` | 逗号分隔的 mode 列表，例如 `9（四人金南）,12（四人玉南）,16（四人王座南）` |
 | `--model-tag` | `4.1b` | Mortal 分析模型版本 |
+| `--review-language`, `--lang` | `zh-CN` | 跑谱页面语言，会写入 `mjai.ekyu.moe` 表单字段 `select[name="lang"]`。可选 `zh-CN`, `en`, `ja`, `ko` |
 | `--retry` | `3` | 失败条目的重试次数。每次重试都会重新打开分析页并重新提交 |
 | `--badmove` | `False` | 额外统计恶手率。开启后会在日志和结果文件中写入 5% 与 10% 两档恶手率 |
 

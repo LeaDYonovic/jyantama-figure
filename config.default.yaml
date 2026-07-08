@@ -16,6 +16,16 @@ modes: "12"
 # Mortal 分析模型版本 (默认: "4.1b")
 model_tag: "4.1b"
 
+# 跑谱页面语言，会同时：
+# 1. 打开对应语言的 mjai.ekyu.moe 页面
+# 2. 写入页面表单字段 `select[name="lang"]`
+# 字段值配置：
+#   zh-CN -> 简体中文，页面 /zh-cn.html
+#   en    -> English，页面 /
+#   ja    -> 日本語，页面 /ja.html
+#   ko    -> 한국어，页面 /ko.html
+review_language: "zh-CN"
+
 # 是否额外分析恶手率。默认关闭，开启后会统计 5% 和 10% 两档恶手率
 analyze_bad_move_rate: false
 

@@ -7,7 +7,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from batchmortal.api import build_paipu_urls, get_player_records, search_player, get_player_nickname_by_id
-from batchmortal.browser import BrowserAutomator, ReviewSubmissionCoordinator
+from batchmortal.browser import BrowserAutomator, ReviewSubmissionCoordinator, normalize_review_language
 from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids, read_result_rows
 from batchmortal.visualize import plot_results
 from seleniumbase import SB
@@ -25,6 +25,13 @@ def configure_logging():
 
 def log_line(message=""):
     logging.info(message)
+
+
+def parse_review_language(value):
+    try:
+        return normalize_review_language(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def parse_args():
@@ -69,6 +76,19 @@ def parse_args():
     )
     analysis_group.add_argument(
         "--model-tag", "--model_tag", default=config.get("model_tag", "4.1b"), help="Mortal network version", dest="model_tag"
+    )
+    review_language_config = config.get("review_language", config.get("lang"))
+    try:
+        review_language_default = normalize_review_language(review_language_config)
+    except ValueError as exc:
+        parser.error(str(exc))
+    analysis_group.add_argument(
+        "--review-language", "--review_language", "--lang",
+        default=review_language_default,
+        type=parse_review_language,
+        metavar="{zh-CN,en,ja,ko}",
+        help="Review page language; writes the mjai.ekyu.moe form field select[name='lang']",
+        dest="review_language"
     )
     analysis_group.add_argument(
         "--retry", type=int, default=config.get("retry", 3), help="Retry failed review items this many times"
@@ -238,6 +258,7 @@ def print_summary(args, modes):
     log_line(f"  Modes:     {modes}")
     log_line(f"  Limit:     {args.limit} per mode")
     log_line(f"  ModelTag:  {args.model_tag}")
+    log_line(f"  Language:  {args.review_language}")
     log_line(f"  Headless:  {args.headless}")
     log_line(f"  DryRun:    {args.dry_run}")
     log_line(f"  Retry:     {args.retry}")
@@ -551,6 +572,7 @@ def main():
             automator = BrowserAutomator(
                 headless=args.headless,
                 proxy=proxy,
+                review_language=args.review_language,
                 submission_coordinator=None,
                 controlled_submission=False,
             )
@@ -563,6 +585,7 @@ def main():
             automator = BrowserAutomator(
                 headless=args.headless,
                 proxy=proxy,
+                review_language=args.review_language,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
@@ -575,6 +598,7 @@ def main():
             automator = BrowserAutomator(
                 headless=args.headless,
                 proxy=proxy,
+                review_language=args.review_language,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
