@@ -43,6 +43,16 @@ def test_numeric_and_long_source_aliases_remain_supported():
     assert source_for_mode("th") == "tenhou"
 
 
+def test_normalize_source_mode_defaults_to_mj_for_none():
+    assert normalize_source_mode(None) == "mj"
+
+
+@pytest.mark.parametrize("value", ["foo", 2])
+def test_normalize_source_mode_rejects_unsupported_values(value):
+    with pytest.raises(ValueError, match="Unsupported source mode"):
+        normalize_source_mode(value)
+
+
 def test_legacy_source_config_is_still_readable():
     mode, source, selected = resolve_mode_config(
         {
