@@ -9,9 +9,19 @@ from datetime import datetime, timezone
 from batchmortal.api import build_paipu_urls, get_player_records, search_player, get_player_nickname_by_id
 from batchmortal.browser import BrowserAutomator, ReviewSubmissionCoordinator, normalize_review_language
 from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids, read_result_rows
+from batchmortal.tenhou import (
+    build_tenhou_paipu_urls,
+    fetch_tenhou_player_records,
+    normalize_tenhou_modes,
+)
 from batchmortal.visualize import plot_results
 from seleniumbase import SB
-from batchmortal.config import load_config
+from batchmortal.config import (
+    load_config,
+    normalize_source_mode,
+    resolve_mode_config,
+    source_for_mode,
+)
 
 
 def configure_logging():
@@ -37,9 +47,19 @@ def parse_review_language(value):
 def parse_args():
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", help="Path to config file (yaml or toml)")
+    pre_parser.add_argument("--mode")
+    pre_parser.add_argument("--source", "--platform", dest="legacy_source")
     pre_args, _ = pre_parser.parse_known_args()
 
-    config = load_config(pre_args.config)
+    raw_config = load_config(pre_args.config)
+    requested_mode = pre_args.mode or pre_args.legacy_source
+    try:
+        config_mode, _, config = resolve_mode_config(
+            raw_config,
+            requested_mode=requested_mode,
+        )
+    except ValueError as exc:
+        pre_parser.error(str(exc))
 
     parser = argparse.ArgumentParser(
         description="Batch Mortal Analysis Script (Python/SeleniumBase Edition)",
@@ -48,6 +68,20 @@ def parse_args():
 
     # -- General Options --
     parser.add_argument("--config", help="Path to config file (yaml or toml)")
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--mode",
+        choices=["mj", "th", "0", "1"],
+        default=config_mode,
+        help="Exclusive source mode: mj/0 for Mahjong Soul, th/1 for Tenhou",
+    )
+    source_group.add_argument(
+        "--source", "--platform",
+        choices=["majsoul", "tenhou"],
+        default=None,
+        help="Legacy source selector; use --mode for new configurations",
+        dest="legacy_source",
+    )
     dry_run_default = config.get("dry_run", False)
     parser.add_argument(
         "--dry-run", "--dry_run",
@@ -60,7 +94,7 @@ def parse_args():
     # -- Target Options --
     target_group = parser.add_argument_group("Target Options")
     target_group.add_argument(
-        "-p", "-u", "--player", dest="player", default=config.get("player") or config.get("nickname"), help="Player nickname"
+        "-p", "-u", "--player", dest="player", default=config.get("player") or config.get("nickname"), help="Player nickname on the selected source"
     )
     target_group.add_argument(
         "-a", "--account-id", "--account_id", dest="account_id", type=int, default=config.get("account_id"), help="Directly specify player account ID"
@@ -72,7 +106,9 @@ def parse_args():
         "--limit", type=int, default=config.get("limit", 10), help="Max records per mode"
     )
     analysis_group.add_argument(
-        "--modes", default=str(config.get("modes", "9")), help="Comma-separated mode IDs"
+        "--modes",
+        default=None,
+        help="Comma-separated modes: Mahjong Soul numeric IDs, or Tenhou all/4p/4p-east/4p-south/3p/3p-east/3p-south",
     )
     analysis_group.add_argument(
         "--model-tag", "--model_tag", default=config.get("model_tag", "4.1b"), help="Mortal network version", dest="model_tag"
@@ -184,21 +220,39 @@ def parse_args():
     )
     
     args = parser.parse_args()
-    
-    if not args.player and not args.account_id:
-        parser.error("-p/--player or -a/--account-id is required either via command line arguments or config file")
+
+    if args.legacy_source:
+        args.mode = normalize_source_mode(args.legacy_source)
+    else:
+        args.mode = normalize_source_mode(args.mode)
+    args.source = source_for_mode(args.mode)
+
+    if args.modes is None:
+        fallback = "all" if args.source == "tenhou" else "9"
+        args.modes = str(config.get("modes", fallback))
+
+    if args.source == "tenhou":
+        if not args.player:
+            parser.error("Tenhou source requires -p/--player (a Tenhou player name)")
+        if args.account_id:
+            parser.error("--account-id is only supported by the majsoul source")
+    elif not args.player and not args.account_id:
+        parser.error("Mahjong Soul source requires -p/--player or -a/--account-id")
         
     args.target_name = args.player if args.player else str(args.account_id)
         
     return args
 
 
-def build_output_path(nickname: str, output_format: str) -> tuple[str, str]:
+def build_output_path(nickname: str, output_format: str, source: str = "majsoul") -> tuple[str, str]:
     safe_nick = "".join(
         c if c.isalnum() or c in ("_", "-", "\u4e00", "\u9fa5") else "_"
         for c in nickname
     )
-    output_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", safe_nick)
+    results_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+    if source == "tenhou":
+        results_root = os.path.join(results_root, "tenhou")
+    output_root = os.path.join(results_root, safe_nick)
     out_path = os.path.join(output_root, f"results.{output_format}")
     return output_root, out_path
 
@@ -210,7 +264,17 @@ def detect_proxy(explicit_proxy: str | None) -> str | None:
     return sys_proxies.get("https") or sys_proxies.get("http")
 
 
-def collect_tasks(account_id: int, modes: list[int], limit: int, output_root: str, processed_uuids: set) -> list[dict]:
+def finalize_tasks(tasks: list[dict]) -> list[dict]:
+    total_tasks = len(tasks)
+    for index, task in enumerate(tasks, start=1):
+        task["idx"] = index
+        task["total"] = total_tasks
+        short_url = task["uuid"].split("-")[-1]
+        task["log_prefix"] = f"[{index}/{total_tasks}][{short_url}]"
+    return tasks
+
+
+def collect_majsoul_tasks(account_id: int, modes: list[int], limit: int, output_root: str, processed_uuids: set) -> list[dict]:
     tasks = []
     for mode in modes:
         log_line(f"[Mode {mode}] Fetching records...")
@@ -232,6 +296,7 @@ def collect_tasks(account_id: int, modes: list[int], limit: int, output_root: st
                 continue
             tasks.append(
                 {
+                    "source": "majsoul",
                     "mode": mode,
                     "uuid": item["uuid"],
                     "paipu_url": item["paipuUrl"],
@@ -241,20 +306,43 @@ def collect_tasks(account_id: int, modes: list[int], limit: int, output_root: st
                 }
             )
 
-    total_tasks = len(tasks)
-    for index, task in enumerate(tasks, start=1):
-        task["idx"] = index
-        task["total"] = total_tasks
-        short_url = task["uuid"].split("-")[-1]
-        task["log_prefix"] = f"[{index}/{total_tasks}][{short_url}]"
+    return finalize_tasks(tasks)
 
-    return tasks
+
+def collect_tenhou_tasks(
+    records: list[dict],
+    player_name: str,
+    modes: tuple[str, ...],
+    limit: int,
+    output_root: str,
+    processed_uuids: set,
+) -> list[dict]:
+    items = build_tenhou_paipu_urls(records, player_name, modes=modes, limit=limit)
+    tasks = []
+    for item in items:
+        if item["uuid"] in processed_uuids:
+            log_line(f"[Skip] uuid={item['uuid']} already processed.")
+            continue
+        mode = item["mode"]
+        tasks.append(
+            {
+                "source": "tenhou",
+                "mode": mode,
+                "uuid": item["uuid"],
+                "paipu_url": item["paipuUrl"],
+                "start_time": item.get("startTime", ""),
+                "end_time": item.get("endTime", ""),
+                "mode_dir": os.path.join(output_root, f"mode_{mode}"),
+            }
+        )
+    return finalize_tasks(tasks)
 
 
 def print_summary(args, modes):
     log_line("=== Batch Mortal Analysis ===")
     target_display = args.target_name + (f" (ID: {args.account_id})" if args.account_id and args.target_name != str(args.account_id) else "")
     log_line(f"  Target:    {target_display}")
+    log_line(f"  Mode:      {args.mode} ({args.source})")
     log_line(f"  Modes:     {modes}")
     log_line(f"  Limit:     {args.limit} per mode")
     log_line(f"  ModelTag:  {args.model_tag}")
@@ -350,6 +438,7 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     base_row = {
         "nickname": args.target_name,
+        "source": task.get("source", args.source),
         "mode": task["mode"],
         "uuid": task["uuid"],
         "paipuUrl": task["paipu_url"],
@@ -527,13 +616,26 @@ def main():
     start_time = time.time()
     args = parse_args()
     args.retry = max(0, args.retry)
-    modes = [int(mode.strip()) for mode in args.modes.split(",")]
+    try:
+        if args.source == "tenhou":
+            modes = normalize_tenhou_modes(args.modes)
+        else:
+            modes = [int(mode.strip()) for mode in args.modes.split(",") if mode.strip()]
+            if not modes:
+                raise ValueError("At least one Mahjong Soul mode is required.")
+    except ValueError as exc:
+        logging.error(f"[FATAL] {exc}")
+        sys.exit(2)
 
     if not args.dry_run:
         ensure_uc_driver()
 
+    account_id = None
+    tenhou_records = None
     try:
-        if args.account_id:
+        if args.source == "tenhou":
+            args.target_name, tenhou_records = fetch_tenhou_player_records(args.player)
+        elif args.account_id:
             account_id = args.account_id
             if not args.player:
                 # Attempt to fetch nickname to use as the target
@@ -549,7 +651,7 @@ def main():
 
     print_summary(args, modes)
 
-    output_root, out_path = build_output_path(args.target_name, args.output)
+    output_root, out_path = build_output_path(args.target_name, args.output, args.source)
     processed_uuids = get_processed_uuids(out_path, args.output)
     proxy = detect_proxy(args.proxy)
 
@@ -558,7 +660,17 @@ def main():
     else:
         logging.info("[Proxy] No system proxy detected, running directly.")
 
-    tasks = collect_tasks(account_id, modes, args.limit, output_root, processed_uuids)
+    if args.source == "tenhou":
+        tasks = collect_tenhou_tasks(
+            tenhou_records,
+            args.target_name,
+            modes,
+            args.limit,
+            output_root,
+            processed_uuids,
+        )
+    else:
+        tasks = collect_majsoul_tasks(account_id, modes, args.limit, output_root, processed_uuids)
     total_processed = 0
     total_failed = 0
     analysis_stats = create_analysis_stats()
@@ -616,7 +728,13 @@ def main():
     log_line(f"  Time:      {elapsed:.2f}s")
     if not args.dry_run:
         log_line(f"  Output:    {out_path}")
-        plot_results(args.target_name, args.plot, args.output, plot_limit=args.plot_limit)
+        plot_results(
+            args.target_name,
+            args.plot,
+            args.output,
+            plot_limit=args.plot_limit,
+            output_root=output_root,
+        )
     log_line("============")
 
 

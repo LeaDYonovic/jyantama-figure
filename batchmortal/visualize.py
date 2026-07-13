@@ -5,13 +5,19 @@ import logging
 from datetime import datetime
 import openpyxl
 
-def read_results(nickname: str, output_format: str = "xlsx") -> list[dict]:
+def read_results(
+    nickname: str,
+    output_format: str = "xlsx",
+    output_root: str | None = None,
+) -> list[dict]:
     safe_nick = "".join(
         c if c.isalnum() or c in ("_", "-", "\u4e00", "\u9fa5") else "_"
         for c in nickname
     )
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    filepath = os.path.join(base_dir, "results", safe_nick, f"results.{output_format}")
+    if output_root is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        output_root = os.path.join(base_dir, "results", safe_nick)
+    filepath = os.path.join(output_root, f"results.{output_format}")
     
     if not os.path.exists(filepath):
         logging.warning(f"No results found for {nickname} at {filepath}")
@@ -78,8 +84,14 @@ def calculate_regression(y_vals: list[float]) -> list[float]:
         return [sum(y_vals) / n] * n
 
 
-def generate_html(nickname: str, output_path: str, format_type: str = "xlsx", plot_limit: int | None = None) -> str | None:
-    records = read_results(nickname, format_type)
+def generate_html(
+    nickname: str,
+    output_path: str,
+    format_type: str = "xlsx",
+    plot_limit: int | None = None,
+    results_root: str | None = None,
+) -> str | None:
+    records = read_results(nickname, format_type, output_root=results_root)
     if not records:
         return None
 
@@ -399,7 +411,13 @@ def save_png(html_path: str, png_path: str):
         sb.sleep(1.0)
         sb.save_screenshot(png_path, selector="#main")
 
-def plot_results(nickname: str, plot_mode: str, output_format: str = "xlsx", plot_limit: int | None = None):
+def plot_results(
+    nickname: str,
+    plot_mode: str,
+    output_format: str = "xlsx",
+    plot_limit: int | None = None,
+    output_root: str | None = None,
+):
     if plot_mode in ["none", None]:
         return
         
@@ -407,15 +425,22 @@ def plot_results(nickname: str, plot_mode: str, output_format: str = "xlsx", plo
         c if c.isalnum() or c in ("_", "-", "\u4e00", "\u9fa5") else "_"
         for c in nickname
     )
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    output_root = os.path.join(base_dir, "results", safe_nick)
+    if output_root is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        output_root = os.path.join(base_dir, "results", safe_nick)
     os.makedirs(output_root, exist_ok=True)
     
     html_path = os.path.join(output_root, f"report_{safe_nick}.html")
     png_path = os.path.join(output_root, f"report_{safe_nick}.png")
     
     logging.info(f"Generating charts for {nickname} (Mode: {plot_mode}, Limit: {plot_limit or 'all'})...")
-    res = generate_html(nickname, html_path, output_format, plot_limit=plot_limit)
+    res = generate_html(
+        nickname,
+        html_path,
+        output_format,
+        plot_limit=plot_limit,
+        results_root=output_root,
+    )
     if not res:
         logging.warning("Skipping chart generation.")
         return

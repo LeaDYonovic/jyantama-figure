@@ -1,6 +1,79 @@
 import os
 import sys
 
+
+MODE_TO_SOURCE = {
+    "mj": "majsoul",
+    "th": "tenhou",
+}
+SOURCE_MODE_ALIASES = {
+    "mj": "mj",
+    "majsoul": "mj",
+    "mahjong-soul": "mj",
+    "0": "mj",
+    "th": "th",
+    "tenhou": "th",
+    "1": "th",
+}
+
+
+def normalize_source_mode(value) -> str:
+    """Normalize source selectors to the canonical config modes ``mj`` or ``th``."""
+    if value is None:
+        return "mj"
+
+    key = str(value).strip().lower().replace("_", "-")
+    mode = SOURCE_MODE_ALIASES.get(key)
+    if not mode:
+        raise ValueError(
+            f"Unsupported source mode '{value}'. Use 'mj' for Mahjong Soul or 'th' for Tenhou."
+        )
+    return mode
+
+
+def source_for_mode(mode) -> str:
+    return MODE_TO_SOURCE[normalize_source_mode(mode)]
+
+
+def resolve_mode_config(config: dict, requested_mode=None) -> tuple[str, str, dict]:
+    """
+    Select exactly one source-specific config section.
+
+    New configs use ``mode: mj|th`` with ``mj:`` and ``th:`` mappings. The old
+    top-level ``source: majsoul|tenhou`` format remains readable for backward
+    compatibility. Defining both selectors is rejected so the active source is
+    always unambiguous.
+    """
+    config = config or {}
+    if not isinstance(config, dict):
+        raise ValueError("Config root must be a mapping/object.")
+    configured_mode = config.get("mode")
+    legacy_source = config.get("source")
+
+    if configured_mode is not None and legacy_source is not None:
+        raise ValueError(
+            "Config defines both 'mode' and legacy 'source'. "
+            "Keep exactly one selector: 'mode: mj' or 'mode: th'."
+        )
+
+    selector = requested_mode
+    if selector is None:
+        selector = configured_mode if configured_mode is not None else legacy_source
+    mode = normalize_source_mode(selector)
+
+    section = config.get(mode, {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError(f"Config section '{mode}' must be a mapping/object.")
+
+    effective_config = dict(config)
+    effective_config.update(section)
+    if mode == "th" and "modes" not in section and "tenhou_modes" in config:
+        effective_config["modes"] = config["tenhou_modes"]
+    return mode, MODE_TO_SOURCE[mode], effective_config
+
+
 def load_config(config_path: str = None) -> dict:
     """
     Load configuration from a YAML or TOML file.
