@@ -69,6 +69,7 @@ th:
 | 配置项 | 作用 |
 | :--- | :--- |
 | `review_language` | 分析页面语言：`zh-CN`, `en`, `ja`, `ko` |
+| `review_ui` | 结果页样式：`classic` 或 `killerducky`；默认保持 `classic` 兼容性 |
 | `model_tag` | Mortal 模型版本 |
 | `headless` | 是否无界面运行浏览器 |
 | `dry_run` | 只提取并打印牌谱链接，不启动浏览器 |
@@ -102,12 +103,17 @@ python main.py --config config.example.yaml --mode mj -p 言乾 --modes 12 --lim
 | `-a`, `--account-id` | 雀魂数字账号 ID；天凤不支持 |
 | `--modes` | 逗号分隔的对局模式 |
 | `--limit` | 每个实际模式最多获取的记录数 |
+| `--review-ui` | 结果页样式：`classic` 或 `killerducky` |
 | `--dry-run` | 只打印牌谱 URL |
 | `--headless` | 切换无头浏览器设置 |
 | `--badmove` | 开启恶手率统计 |
 | `--save-local` | 保存 Mortal 结果页 HTML |
 | `--save-screenshot` | 保存结果截图 |
 | `--plot` | 生成 HTML/PNG 图表 |
+
+KillerDucky 页面将 Rating 和 AI 一致率显示在 About 中。项目实际从该页面引用的
+`/report/*.json` 结构化数据读取这些字段；开启 `analyze_bad_move_rate` 后，也会根据每个
+决策的 `actual_index` 与实际选择概率计算 5%/10% 恶手率。两种 UI 的恶手率口径一致。
 
 旧参数 `--source majsoul|tenhou` 仍可兼容使用，但不能和 `--mode` 同时出现；新配置统一推荐 `mode: mj|th`。
 

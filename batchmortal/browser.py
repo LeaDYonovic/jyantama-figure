@@ -9,6 +9,7 @@ from seleniumbase import SB
 
 REVIEW_BASE_URL = "https://mjai.ekyu.moe"
 DEFAULT_REVIEW_LANGUAGE = "zh-CN"
+DEFAULT_REVIEW_UI = "classic"
 
 # Mirrors the reviewer form field `select[name="lang"]`.
 # Supported values on mjai.ekyu.moe are:
@@ -44,6 +45,130 @@ RESULT_SELECTOR = "details > dl"
 REPORT_URL_FRAGMENT = "/report/"
 BAD_MOVE_STRICT_LIMIT = 5
 BAD_MOVE_LOOSE_LIMIT = 10
+
+REVIEW_UI_ALIASES = {
+    "classic": "classic",
+    "killerducky": "killerducky",
+    "killer-ducky": "killerducky",
+    "kd": "killerducky",
+}
+
+
+def normalize_review_ui(review_ui):
+    if review_ui is None:
+        return DEFAULT_REVIEW_UI
+
+    key = str(review_ui).strip().lower().replace("_", "-")
+    normalized = REVIEW_UI_ALIASES.get(key)
+    if normalized:
+        return normalized
+
+    raise ValueError(
+        f"Unsupported review UI '{review_ui}'. Supported values: classic, killerducky"
+    )
+
+
+def parse_killerducky_metadata(data):
+    """Convert KillerDucky's report JSON into the metadata shape used by results.py."""
+    data = data if isinstance(data, dict) else {}
+    review = data.get("review")
+    review = review if isinstance(review, dict) else {}
+
+    total_matches = review.get("total_matches")
+    total_reviewed = review.get("total_reviewed")
+    matches_total = ""
+    if (
+        isinstance(total_matches, (int, float))
+        and isinstance(total_reviewed, (int, float))
+        and total_reviewed > 0
+    ):
+        rate = 100 * total_matches / total_reviewed
+        matches_total = f"{int(total_matches)}/{int(total_reviewed)} = {rate:.3f}%"
+
+    rating = review.get("rating")
+    formatted_rating = ""
+    if isinstance(rating, (int, float)):
+        formatted_rating = f"{rating * 100:.3f}"
+
+    def text(value):
+        return "" if value is None else str(value)
+
+    return {
+        "engine": text(data.get("engine")),
+        "model tag": text(review.get("model_tag")),
+        "rating": formatted_rating,
+        "matches/total": matches_total,
+        "temperature": text(review.get("temperature")),
+        "game length": text(data.get("game_length")),
+        "player id": text(data.get("player_id")),
+        "review duration": text(data.get("review_time")),
+    }
+
+
+def parse_killerducky_bad_move_stats(
+    data,
+    strict_limit=BAD_MOVE_STRICT_LIMIT,
+    loose_limit=BAD_MOVE_LOOSE_LIMIT,
+):
+    """Calculate bad-move rates from KillerDucky's structured Mortal decisions."""
+    data = data if isinstance(data, dict) else {}
+    review = data.get("review")
+    review = review if isinstance(review, dict) else {}
+    total_reviewed = review.get("total_reviewed")
+    denominator = total_reviewed if isinstance(total_reviewed, int) and total_reviewed >= 0 else None
+
+    strict_count = 0
+    loose_count = 0
+    mismatch_count = 0
+    unparsed_count = 0
+
+    kyokus = review.get("kyokus")
+    for kyoku in kyokus if isinstance(kyokus, list) else []:
+        if not isinstance(kyoku, dict):
+            continue
+        entries = kyoku.get("entries")
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or entry.get("is_equal") is not False:
+                continue
+
+            mismatch_count += 1
+            actual_index = entry.get("actual_index")
+            details = entry.get("details")
+            if (
+                not isinstance(actual_index, int)
+                or not isinstance(details, list)
+                or actual_index < 0
+                or actual_index >= len(details)
+                or not isinstance(details[actual_index], dict)
+            ):
+                unparsed_count += 1
+                continue
+
+            probability = details[actual_index].get("prob")
+            if not isinstance(probability, (int, float)):
+                unparsed_count += 1
+                continue
+
+            probability_percent = probability * 100
+            if probability_percent <= strict_limit:
+                strict_count += 1
+            if probability_percent <= loose_limit:
+                loose_count += 1
+
+    def format_rate(count):
+        if denominator is None or denominator <= 0:
+            return ""
+        return f"{100 * count / denominator:.3f}%"
+
+    return {
+        "badMoveRate5": format_rate(strict_count),
+        "badMoveCount5": str(strict_count),
+        "badMoveRate10": format_rate(loose_count),
+        "badMoveCount10": str(loose_count),
+        "badMoveDenominator": "" if denominator is None else str(denominator),
+        "badMoveOrderLossCount": str(mismatch_count),
+        "badMoveUnparsedCount": str(unparsed_count),
+    }
 
 
 def normalize_review_language(language):
@@ -178,10 +303,12 @@ class BrowserAutomator:
         submission_coordinator=None,
         controlled_submission=True,
         review_language=DEFAULT_REVIEW_LANGUAGE,
+        review_ui=DEFAULT_REVIEW_UI,
     ):
         self.headless = headless
         self.proxy = proxy
         self.review_language = normalize_review_language(review_language)
+        self.review_ui = normalize_review_ui(review_ui)
         self.review_url = build_review_url(self.review_language)
         self.controlled_submission = controlled_submission
         if controlled_submission:
@@ -826,6 +953,7 @@ class BrowserAutomator:
             const paipuUrl = arguments[0];
             const modelTag = arguments[1];
             const reviewLanguage = arguments[2];
+            const reviewUi = arguments[3];
 
             const dispatch = (el) => {
               el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -857,7 +985,7 @@ class BrowserAutomator:
 
             setSelect('select[name="engine"]', 'mortal');
             setSelect('select[name="mortal-model-tag"]', modelTag);
-            setSelect('select[name="ui"]', 'classic');
+            setSelect('select[name="ui"]', reviewUi);
             setSelect('select[name="lang"]', reviewLanguage);
 
             const details = document.querySelector('details.details.mb-3');
@@ -870,7 +998,7 @@ class BrowserAutomator:
               showRating.click();
             }
 
-            const form = document.querySelector(arguments[3]);
+            const form = document.querySelector(arguments[4]);
             if (form) {
               form.target = '_self';
             }
@@ -880,6 +1008,7 @@ class BrowserAutomator:
             paipu_url,
             model_tag,
             self.review_language,
+            self.review_ui,
             FORM_SELECTOR,
         )
 
@@ -971,6 +1100,12 @@ class BrowserAutomator:
         raise RuntimeError(f"{log_prefix} Review submission never left the form page")
 
     def _extract_metadata(self, sb):
+        killerducky_data = self._extract_killerducky_data(sb)
+        if killerducky_data:
+            return parse_killerducky_metadata(killerducky_data)
+        if self.review_ui == "killerducky":
+            raise RuntimeError("Could not extract KillerDucky report JSON")
+
         metadata = sb.execute_script(
             """
             const data = {};
@@ -986,6 +1121,56 @@ class BrowserAutomator:
             """
         )
         return metadata or {}
+
+    def _extract_killerducky_data(self, sb, include_entries=False):
+        try:
+            data = sb.execute_script(
+                """
+                if (!(window.MM && window.MM.GS && window.MM.GS.fullData)) {
+                  return null;
+                }
+
+                const source = window.MM.GS.fullData;
+                const review = source.review || {};
+                const includeEntries = arguments[0];
+                return {
+                  engine: source.engine,
+                  game_length: source.game_length,
+                  review_time: source.review_time,
+                  player_id: source.player_id,
+                  review: {
+                    model_tag: review.model_tag,
+                    rating: review.rating,
+                    temperature: review.temperature,
+                    total_matches: review.total_matches,
+                    total_reviewed: review.total_reviewed,
+                    kyokus: includeEntries && Array.isArray(review.kyokus)
+                      ? review.kyokus.map((kyoku) => ({
+                          entries: Array.isArray(kyoku.entries) ? kyoku.entries.map((entry) => {
+                            const actualIndex = entry.actual_index;
+                            const details = Array.isArray(entry.details)
+                              ? entry.details.map((detail, index) => (
+                                  index === actualIndex ? {prob: detail.prob} : null
+                                ))
+                              : null;
+                            return {
+                              is_equal: entry.is_equal,
+                              actual_index: actualIndex,
+                              details,
+                            };
+                          }) : [],
+                        }))
+                      : [],
+                  },
+                };
+                """,
+                include_entries,
+            )
+            return data if isinstance(data, dict) else None
+        except Exception as exc:
+            if self.review_ui == "killerducky":
+                raise RuntimeError("Could not read KillerDucky report JSON") from exc
+            return None
 
     def _save_local_paipu(self, sb, filepath, source_url, log_prefix):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -1031,6 +1216,10 @@ class BrowserAutomator:
 
     def _extract_bad_move_stats(self, sb, log_prefix):
         try:
+            killerducky_data = self._extract_killerducky_data(sb, include_entries=True)
+            if killerducky_data:
+                return parse_killerducky_bad_move_stats(killerducky_data)
+
             stats = sb.execute_script(
                 """
                 const strictLimit = arguments[0];
@@ -1139,7 +1328,22 @@ class BrowserAutomator:
     def _wait_for_result_or_error(self, sb, log_prefix, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if sb.is_element_present(RESULT_SELECTOR):
+            if self.review_ui == "killerducky":
+                try:
+                    killerducky_ready = sb.execute_script(
+                        """
+                        return !!(
+                          window.MM && window.MM.GS && window.MM.GS.fullData
+                          && window.MM.GS.fullData.review
+                          && document.querySelector('.about-metadata table')
+                        );
+                        """
+                    )
+                except Exception:
+                    killerducky_ready = False
+                if killerducky_ready:
+                    return
+            elif sb.is_element_present(RESULT_SELECTOR):
                 return
 
             state = self._read_review_state(sb)
@@ -1174,6 +1378,18 @@ class BrowserAutomator:
 
     def _expand_metadata_panel(self, sb, log_prefix):
         try:
+            if self.review_ui == "killerducky":
+                sb.execute_script(
+                    """
+                    const modal = document.getElementById('about-modal');
+                    if (modal && !modal.open) {
+                      modal.showModal();
+                    }
+                    """
+                )
+                time.sleep(0.5)
+                return
+
             is_open = sb.execute_script(
                 """
                 const details = document.querySelector('body > details:nth-child(6)');

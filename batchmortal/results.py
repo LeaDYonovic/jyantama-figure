@@ -47,7 +47,7 @@ def parse_metadata(metadata: dict) -> dict:
                     return value
         return ""
 
-    ai_consistency = get(["\u4e00\u81f4\u7387", "Match Rate"])
+    ai_consistency = get(["\u4e00\u81f4\u7387", "Match Rate", "Matches/total"])
     numerator, denominator, rate = "", "", ""
 
     # Matches strings like "195/271 = 71.956%".

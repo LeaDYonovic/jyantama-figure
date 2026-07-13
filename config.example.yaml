@@ -36,6 +36,11 @@ model_tag: "4.1b"
 #   ko    -> 한국어，页面 /ko.html
 review_language: "zh-CN"
 
+# 分析结果页面样式：
+#   killerducky -> KillerDucky 交互界面；从页面引用的结构化 JSON 读取 Rating、AI 一致率和恶手率
+#   classic     -> 经典长页面；保留原有 DOM 解析方式
+review_ui: "killerducky"
+
 # 是否额外分析恶手率。默认关闭，开启后会统计 5% 和 10% 两档恶手率
 analyze_bad_move_rate: true
 

@@ -7,7 +7,12 @@ import urllib.request
 from datetime import datetime, timezone
 
 from batchmortal.api import build_paipu_urls, get_player_records, search_player, get_player_nickname_by_id
-from batchmortal.browser import BrowserAutomator, ReviewSubmissionCoordinator, normalize_review_language
+from batchmortal.browser import (
+    BrowserAutomator,
+    ReviewSubmissionCoordinator,
+    normalize_review_language,
+    normalize_review_ui,
+)
 from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids, read_result_rows
 from batchmortal.tenhou import (
     build_tenhou_paipu_urls,
@@ -40,6 +45,13 @@ def log_line(message=""):
 def parse_review_language(value):
     try:
         return normalize_review_language(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def parse_review_ui(value):
+    try:
+        return normalize_review_ui(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
@@ -125,6 +137,19 @@ def parse_args():
         metavar="{zh-CN,en,ja,ko}",
         help="Review page language; writes the mjai.ekyu.moe form field select[name='lang']",
         dest="review_language"
+    )
+    review_ui_config = config.get("review_ui", config.get("ui"))
+    try:
+        review_ui_default = normalize_review_ui(review_ui_config)
+    except ValueError as exc:
+        parser.error(str(exc))
+    analysis_group.add_argument(
+        "--review-ui", "--review_ui", "--ui",
+        default=review_ui_default,
+        type=parse_review_ui,
+        metavar="{classic,killerducky}",
+        help="Review result UI; KillerDucky metadata and bad-move data are parsed from report JSON",
+        dest="review_ui",
     )
     analysis_group.add_argument(
         "--retry", type=int, default=config.get("retry", 3), help="Retry failed review items this many times"
@@ -349,6 +374,7 @@ def print_summary(args, modes):
     log_line(f"  Limit:     {args.limit} per mode")
     log_line(f"  ModelTag:  {args.model_tag}")
     log_line(f"  Language:  {args.review_language}")
+    log_line(f"  ReviewUI:  {args.review_ui}")
     log_line(f"  Headless:  {args.headless}")
     log_line(f"  DryRun:    {args.dry_run}")
     log_line(f"  Retry:     {args.retry}")
@@ -687,6 +713,7 @@ def main():
                 headless=args.headless,
                 proxy=proxy,
                 review_language=args.review_language,
+                review_ui=args.review_ui,
                 submission_coordinator=None,
                 controlled_submission=False,
             )
@@ -700,6 +727,7 @@ def main():
                 headless=args.headless,
                 proxy=proxy,
                 review_language=args.review_language,
+                review_ui=args.review_ui,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
@@ -713,6 +741,7 @@ def main():
                 headless=args.headless,
                 proxy=proxy,
                 review_language=args.review_language,
+                review_ui=args.review_ui,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
             )
