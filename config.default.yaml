@@ -3,15 +3,25 @@
 # 或者直接在主目录下放置名为 config.yaml 或 config.toml 的文件
 # 命令行传入的参数会覆盖这里的配置
 
-# 目标雀魂玩家昵称（必须提供，可以在命令行中通过位置参数指定，也可以在此处指定）
-nickname: ""
+# 数据源模式，同时只能选择一个：
+#   mj（或 0） -> 雀魂 / amae-koromo
+#   th（或 1） -> 天凤 / nodocchi.moe
+mode: "th"
 
-# 每个 mode 最多拉取多少条记录 (默认: 10)
-limit: 10
+# 雀魂配置；仅在 mode: "mj" 时读取
+mj:
+  nickname: ""
+  # account_id: 12345678  # 可用数字账号 ID 替代 nickname
+  limit: 10
+  # 常见 modes: 9（四人金南）, 12（四人玉南）, 16（四人王座南）
+  modes: "12"
 
-# 逗号分隔的 mode 列表 (默认: "9")
-# 常见 mode: 9（四人金南）, 12（四人玉南）, 16（四人王座南）
-modes: "12"
+# 天凤配置；仅在 mode: "th" 时读取
+th:
+  nickname: ""
+  limit: 10
+  # 可选：all, 4p, 4p-east, 4p-south, 3p, 3p-east, 3p-south
+  modes: "4p-south"
 
 # Mortal 分析模型版本 (默认: "4.1b")
 model_tag: "4.1b"
@@ -27,7 +37,7 @@ model_tag: "4.1b"
 review_language: "zh-CN"
 
 # 是否额外分析恶手率。默认关闭，开启后会统计 5% 和 10% 两档恶手率
-analyze_bad_move_rate: false
+analyze_bad_move_rate: true
 
 # 是否在后台以无头模式运行浏览器 (强烈推荐 true)
 headless: true
@@ -36,10 +46,10 @@ headless: true
 dry_run: false
 
 # 是否保存分析结果页面的截图 (举报时有用)
-save_screenshot: true
+save_screenshot: false
 
 # 是否保存 Mortal 分析结果页面到本地 HTML
-save_local_paipu: false
+save_local_paipu: true
 
 # 导出格式，可选 "xlsx" 或 "csv" (默认: "xlsx")
 output: "xlsx"
@@ -51,14 +61,14 @@ retry: 3
 # 如果留空或注释掉，会自动尝试检测系统代理
 # proxy: "http://127.0.0.1:7890"
 
-# 实验性功能：双窗口接力机制 (默认: false)
+# 双窗口接力机制 (默认: false)
 prewarm_standby: true
 
 # 危险的高并发请求，容易导致Cloudflare卡盾拦截 (弃用，推荐置空或保留为false)
 unsafe_parallel_review: false
 
 # 绘图选项，支持 "none", "html", "png", "both" (默认: "none")
-plot: "none"
+plot: "both"
 
 # 画图时取最近多少条数据 (默认: 全部)
 # 设置后仅取最新的 N 条数据用于绘图

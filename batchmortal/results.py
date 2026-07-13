@@ -6,6 +6,7 @@ import openpyxl
 
 CSV_COLUMNS = [
     "nickname",
+    "source",
     "mode",
     "uuid",
     "paipuUrl",
