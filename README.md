@@ -139,6 +139,8 @@ results/
 
 导出结果包含 `source` 字段，用于标识 `majsoul` 或 `tenhou`。天凤模式目录示例为 `mode_4p-south`。
 
+可视化报告包含关键指标卡、Rating 单局值与滚动均值、按决策数加权的 AI 一致率、Rating 分布和低分对局复盘入口。缺失指标显示为 `—`，不会按 0 计入图表或汇总。
+
 从旧版本升级时，请将原有的 `results/<nickname>/` 雀魂目录移动到 `results/majsoul/<nickname>/`；否则程序无法从新目录识别以前已经处理的牌谱。
 
 ## 注意事项
