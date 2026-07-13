@@ -20,7 +20,7 @@ mj:
 th:
   nickname: ""
   limit: 10
-  # 可选：all, 4p, 4p-east, 4p-south, 3p, 3p-east, 3p-south
+  # 天凤仅接受四人半庄（四麻南场），固定使用 4p-south
   modes: "4p-south"
 
 # Mortal 分析模型版本 (默认: "4.1b")
@@ -64,7 +64,7 @@ retry: 3
 # 双窗口接力机制 (默认: false)
 prewarm_standby: true
 
-# 危险的高并发请求，容易导致Cloudflare卡盾拦截 (弃用，推荐置空或保留为false)
+# 跳过受控提交协调；不代表真正并发，可能更容易触发 Cloudflare/Turnstile
 unsafe_parallel_review: false
 
 # 绘图选项，支持 "none", "html", "png", "both" (默认: "none")

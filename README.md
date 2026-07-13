@@ -1,14 +1,14 @@
 # Batch Mortal Analysis
 
-`batchmortal` 是一个基于 Python 和 SeleniumBase 的批量牌谱分析脚本。它支持从 `amae-koromo` 拉取雀魂对局，或从 `nodocchi.moe` 拉取天凤对局，再自动打开 `mjai.ekyu.moe` 提交牌谱、等待分析完成，并把结果导出为 `xlsx` 或 `csv`。
+`batchmortal` 是一个批量牌谱分析脚本：从 `amae-koromo` 获取雀魂对局，或从 `nodocchi.moe` 获取天凤四人半庄对局，再通过 SeleniumBase 将牌谱提交到 `mjai.ekyu.moe`，最后导出 CSV/XLSX 结果与可选图表。
 
 ## 环境要求
 
-- Python 3.8+
+- Python 3.10+
 - Google Chrome
-- 可访问目标站点的网络环境
+- 能够访问所选数据源及 `mjai.ekyu.moe` 的网络环境
 
-安装依赖：
+安装：
 
 ```bash
 git clone https://github.com/myouo/batchmortal.git
@@ -16,181 +16,135 @@ cd batchmortal
 pip install -r requirements.txt
 ```
 
-## 基本用法
+## 推荐：使用配置文件
+
+项目提供完整示例配置 [`config.example.yaml`](config.example.yaml)。先编辑其中的 `mode` 和对应玩家 ID，再运行：
 
 ```bash
-# 雀魂（默认数据源）
-python main.py -p <玩家昵称> [选项]
-# 或者
-python main.py -a <数字账号ID> [选项]
-
-# 天凤（通过 nodocchi.moe）
-python main.py --mode th -p <天凤ID> [选项]
+python main.py --config config.example.yaml
 ```
 
-### 使用配置文件（推荐）
+建议先开启 `dry_run: true`，确认玩家、模式和提取出的牌谱链接正确；确认后改回 `false` 进行 Mortal 分析。
 
-你可以通过配置文件来简化命令行输入。在项目根目录下创建一个 `config.yaml` 或 `config.toml` 文件（或参考 [`config.default.yaml`](config.default.yaml)）。
-
-示例 `config.yaml`：
+### 数据源配置
 
 ```yaml
-# 同时只能选择一个：mj（雀魂）或 th（天凤）；也接受 0 / 1
-mode: "mj"
+# 同时只能选择一个数据源：mj/0 为雀魂，th/1 为天凤
+mode: "th"
 
+# mode: mj 时只读取这一段
 mj:
-  nickname: "言乾"
+  nickname: ""
+  # account_id: 12345678
   limit: 10
   modes: "12"
 
+# mode: th 时只读取这一段
 th:
-  nickname: "ププリン"
+  nickname: ""
   limit: 10
   modes: "4p-south"
-
-review_language: "zh-CN"
-headless: true
-save_screenshot: true
-save_local_paipu: false
-output: "xlsx"
 ```
 
-带配置文件的运行方式：
-```bash
-python main.py
-```
-*(你也可以通过 `python main.py --config my_config.yaml` 手动指定配置文件位置。命令行传入的参数会覆盖配置文件中的同名设置。)*
+`mj:` 与 `th:` 可以同时保存两套参数，但每次运行只读取顶层 `mode` 选中的一段：
 
-常见示例（不使用配置文件）：
+- `mode`：数据源开关，推荐填写 `mj` 或 `th`；也兼容 `0` 或 `1`。
+- `modes`：当前数据源内部的对局类型筛选，与顶层 `mode` 含义不同；天凤固定使用 `4p-south`。
+- 雀魂可使用 `nickname`，也可使用数字 `account_id`；天凤必须使用 `nickname`。
+- `limit` 按实际对局模式限制获取数量。
 
+### 对局模式
 
-```bash
-python main.py -p 言乾 --modes 12 --limit 1 --headless --save-screenshot --output xlsx
-
-# 只提取“ププリン”最近 10 条四麻南场天凤牌谱链接，不启动浏览器
-python main.py --mode th -p ププリン --modes 4p-south --limit 10 --dry-run
-```
-
-## 参数说明
-
-### Target Options (目标参数)
-| 参数 | 默认值 | 说明 |
+| 数据源 | `modes` 示例 | 说明 |
 | :--- | :--- | :--- |
-| `--mode` | 配置文件中的 `mode`，否则 `mj` | 唯一数据源选择：`mj`/`0` 为雀魂，`th`/`1` 为天凤 |
-| `--source`, `--platform` | 无 | 旧格式兼容入口：`majsoul` 或 `tenhou`；不能与 `--mode` 同时使用 |
-| `-p`, `--player` | 无 | 所选数据源中的玩家昵称。天凤模式必须提供；雀魂可改用 `-a` |
-| `-a`, `--account-id`| 无 | 直接指定雀魂玩家数字账号 ID；天凤模式不支持。与 `-p` 同时提供时，实际拉取以 `-a` 为准，但目标名称仍沿用 `-p` |
+| 雀魂 `mj` | `9,12,16` | amae-koromo 的数字模式 ID，例如 9 四人金南、12 四人玉南、16 四人王座南 |
+| 天凤 `th` | `4p-south` | 仅接受四人半庄（四麻南场）牌谱 |
 
-### Analysis Options (分析参数)
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--limit` | `10` | 每个实际对局 mode 最多拉取多少条记录 |
-| `--modes` | 雀魂 `9`；天凤 `all` | 雀魂使用数字 ID，如 `9,12,16`；天凤使用 `all`, `4p`, `4p-east`, `4p-south`, `3p`, `3p-east`, `3p-south` |
-| `--model-tag` | `4.1b` | Mortal 分析模型版本 |
-| `--review-language`, `--lang` | `zh-CN` | 跑谱页面语言，会写入 `mjai.ekyu.moe` 表单字段 `select[name="lang"]`。可选 `zh-CN`, `en`, `ja`, `ko` |
-| `--retry` | `3` | 失败条目的重试次数。每次重试都会重新打开分析页并重新提交 |
-| `--badmove` | `False` | 额外统计恶手率。开启后会在日志和结果文件中写入 5% 与 10% 两档恶手率 |
+天凤的 `4p-south` 是本项目根据 Nodocchi 返回的 `playernum` 和 `playlength` 生成的统一筛选名，并非 Nodocchi API 直接返回的字符串。三麻和东风牌谱不在本项目的天凤分析范围内。
 
-### Browser & Network Options (浏览器与网络)
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--headless` | `False` | 后台无界面运行浏览器（强烈推荐） |
-| `--proxy` | 系统代理 | 指定浏览器代理；不传时尝试自动读取系统代理 |
+### 常用公共配置
 
-### Output Options (输出与绘图)
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--output` | `xlsx` | 导出格式，可选 `xlsx` 或 `csv`（默认xlsx） |
-| `--plot` | `none` | 生成折线图：`none`, `html`, `png`, 或 `both`。默认不生成 |
-| `--save-screenshot` | `False` | 保存分析结果页面截图（举报时可用） |
-| `--save-local` | `False` | 保存每条 Mortal 分析结果页的本地 HTML，并在结果文件中记录路径 |
+完整字段和注释请直接查看 [`config.example.yaml`](config.example.yaml)，常用字段包括：
 
-### Advanced Submission Options (高级配置)
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--unsafe-parallel-review` | `False` | 允许并发提交 review。理论上更快，但在单代理环境下通常易失败（已弃用，不推荐） |
-| `--submit-interval` | `6` | 受控模式下，两次提交之间的最小间隔秒数（已弃用，不推荐） |
-| `--submit-cooldown` | `30` | 受控模式下，连续失败后的冷却秒数（已弃用，不推荐） |
-| `--prewarm-standby` | `False` | 实验功能。使用两个持久窗口轮流接力，每次只让当前焦点窗口完整处理一条任务（推荐尝试） |
+| 配置项 | 作用 |
+| :--- | :--- |
+| `review_language` | 分析页面语言：`zh-CN`, `en`, `ja`, `ko` |
+| `model_tag` | Mortal 模型版本 |
+| `headless` | 是否无界面运行浏览器 |
+| `dry_run` | 只提取并打印牌谱链接，不启动浏览器 |
+| `retry` | 单条牌谱失败后的重试次数 |
+| `analyze_bad_move_rate` | 是否统计 5%/10% 两档恶手率 |
+| `save_screenshot` | 是否保存分析结果截图 |
+| `save_local_paipu` | 是否保存 Mortal 结果页 HTML |
+| `output` | `csv` 或 `xlsx` |
+| `plot` | `none`, `html`, `png`, `both` |
+| `plot_limit` | 图表只使用最近 N 条结果；不填表示全部 |
 
-### General / Legacy Options (通用及历史参数)
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--config` | 无 | 指定配置文件路径（支持 yaml/toml），命令行参数会覆盖配置项 |
-| `--dry-run` | `False` | 只拉取并打印牌谱 URL，不启动浏览器 |
-| `--no-manual-verification` | `False` | 兼容旧脚本保留参数，当前无作用（已弃用） |
-| `--flare-url` | 无 | 兼容旧脚本保留参数，当前无作用（已弃用） |
+## 命令行覆盖
 
-配置文件中的 `mj:` 与 `th:` 可以同时保存两套参数，但运行时只读取 `mode` 指定的一个配置段。例如 `mode: "th"` 时，`mj.nickname`、`mj.limit` 和 `mj.modes` 都不会参与本次运行。
-
-注意：顶层单数 `mode` 是数据源开关；配置段里的复数 `modes` 是该平台的对局类型筛选。切换平台只需修改顶层 `mode`。
-
-## 运行模式建议
-
-- 默认模式：单窗口串行，当前最稳。
-- `--prewarm-standby`：实验功能。现在表示“双窗口轮转”，不是后台抢跑预热；在单代理环境下不保证比默认串行更快，但值得一试。
-- `--unsafe-parallel-review`：不推荐在单系统代理环境下使用，通常会增加 Cloudflare/Turnstile 等待和失败率。
-
-推荐先从默认模式开始：
+配置文件是推荐入口；临时参数可以在命令行中覆盖：
 
 ```bash
-python main.py -p 言乾 --limit 10 --modes 16 --headless
+# 使用配置文件，但临时切换到天凤并只提取链接
+python main.py --config config.example.yaml --mode th -p ププリン --modes 4p-south --limit 10 --dry-run
+
+# 使用配置文件，但临时分析指定雀魂玩家
+python main.py --config config.example.yaml --mode mj -p 言乾 --modes 12 --limit 10
 ```
 
-如果你要测试实验性的双窗口轮转：
+主要参数：
 
-注意：这是实验路径，建议只在你已经拿到默认串行基线后再做对比测试。
+| 参数 | 说明 |
+| :--- | :--- |
+| `--config` | 指定 YAML/TOML 配置文件 |
+| `--mode` | 唯一数据源：`mj`/`0` 或 `th`/`1` |
+| `-p`, `--player` | 当前数据源的玩家昵称 |
+| `-a`, `--account-id` | 雀魂数字账号 ID；天凤不支持 |
+| `--modes` | 逗号分隔的对局模式 |
+| `--limit` | 每个实际模式最多获取的记录数 |
+| `--dry-run` | 只打印牌谱 URL |
+| `--headless` | 切换无头浏览器设置 |
+| `--badmove` | 开启恶手率统计 |
+| `--save-local` | 保存 Mortal 结果页 HTML |
+| `--save-screenshot` | 保存结果截图 |
+| `--plot` | 生成 HTML/PNG 图表 |
 
-```bash
-python main.py -p 言乾 --limit 10 --modes 16 --headless --prewarm-standby
-```
+旧参数 `--source majsoul|tenhou` 仍可兼容使用，但不能和 `--mode` 同时出现；新配置统一推荐 `mode: mj|th`。
 
-## 绘图模块 (--plot)
+## 浏览器提交模式
 
-使用 `--plot html` 或 `both` 将会在产出数据后调用底层的可视化引擎生成 `report_<nickname>.html`。
-
-示例：
-```bash
-python main.py -p "main()" --limit 20 --modes 16 --headless --retry 3 --badmove --prewarm-standby --save-screenshot --plot both
-```
-
-![report_main__](assets/report_main__.png)
-
+- 默认：单个持久浏览器串行处理，使用提交间隔和失败冷却，稳定性最好。
+- `prewarm_standby: true`：使用两个持久窗口轮流处理任务；仍是受控提交，不保证更快。
+- `unsafe_parallel_review: true`：绕过受控提交协调，不代表真正的多线程并发，可能更容易触发 Turnstile 或限流。
+- `submit_interval`：受控模式下两次提交的最小间隔秒数。
+- `submit_cooldown`：连续提交失败后的冷却秒数。
 
 ## 输出目录
 
-雀魂结果保持原目录，天凤结果写入独立的 `tenhou` 子目录：
+雀魂与天凤结果分开保存：
 
 ```text
 results/<nickname>/
 results/tenhou/<nickname>/
 ```
 
-常见产物包括：
+常见文件：
 
-- `results/<nickname>/results.xlsx` 或 `results/<nickname>/results.csv`
-- `results/<nickname>/mode_<id>/<uuid>.png`
-- `results/<nickname>/mode_<id>/<uuid>_error.png`
-- `results/<nickname>/mode_<id>/<uuid>.html`
+- `results.xlsx` 或 `results.csv`
+- `mode_<id>/<uuid>.png`
+- `mode_<id>/<uuid>_error.png`
+- `mode_<id>/<uuid>.html`
+- `report_<nickname>.html` / `report_<nickname>.png`
 
-天凤的 mode 目录示例为 `mode_4p-south`。导出的 CSV/XLSX 包含 `source` 列，值为 `majsoul` 或 `tenhou`。
+导出结果包含 `source` 字段，用于标识 `majsoul` 或 `tenhou`。天凤模式目录示例为 `mode_4p-south`。
 
-## 日志
+## 注意事项
 
-运行日志会在每条输出前附带当前系统时间，便于定位慢点和错误发生时刻。
-
-## 说明
-
-- `xlsx` 写入逻辑已做批量化优化，但整体耗时通常主要由浏览器提交、Cloudflare Turnstile 和远端分析生成决定。
-- `--badmove` 只会在新分析的牌谱中统计恶手率；已经成功写入结果文件的牌谱会继续跳过，不会为了补恶手率自动重跑。
-- `--save-local` 只会保存新分析的结果页；已经成功写入结果文件的牌谱会继续跳过，不会为了补本地 HTML 自动重跑。
-- nodocchi 返回的 `tw` 是压缩后的座位排列；脚本会按目标玩家名解码视角，并只接受 `tenhou.net` 的正式牌谱 URL。没有 `url`/`tw` 的历史统计记录不会进入分析队列。
-- 在只有一个系统代理的情况下，多窗口或多线程通常不会线性提速。
-
-## 下一步
-
-- 计划增加常见 id 与`match_id`的对应词典，以满足大家喜爱的主播/牌手改名而自己不愿意去翻的情景，如：{"火龙果说电影" : "8888621"}(主播名称与`account_id`的对应) 以便大家使用。
-- anything in issue...?
+- Nodocchi 返回的 `tw` 是压缩座位排列；脚本会解码目标玩家视角，并且只接受 `tenhou.net` 正式牌谱 URL。
+- Nodocchi 中没有 `url` 或 `tw` 的历史统计记录不会进入 Mortal 分析队列。
+- 已成功写入结果文件的牌谱会跳过；失败记录仍可在后续运行中重试。
+- `--badmove`、本地 HTML 和截图只会应用于新执行的分析，不会自动重跑已经成功的牌谱。
+- 总耗时通常取决于浏览器提交、Cloudflare Turnstile 和远端分析生成速度。
 
 ## License
 
