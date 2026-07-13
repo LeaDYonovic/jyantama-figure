@@ -249,9 +249,11 @@ def build_output_path(nickname: str, output_format: str, source: str = "majsoul"
         c if c.isalnum() or c in ("_", "-", "\u4e00", "\u9fa5") else "_"
         for c in nickname
     )
-    results_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-    if source == "tenhou":
-        results_root = os.path.join(results_root, "tenhou")
+    results_root = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "results",
+        source,
+    )
     output_root = os.path.join(results_root, safe_nick)
     out_path = os.path.join(output_root, f"results.{output_format}")
     return output_root, out_path

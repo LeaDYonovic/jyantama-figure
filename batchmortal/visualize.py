@@ -16,7 +16,7 @@ def read_results(
     )
     if output_root is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        output_root = os.path.join(base_dir, "results", safe_nick)
+        output_root = os.path.join(base_dir, "results", "majsoul", safe_nick)
     filepath = os.path.join(output_root, f"results.{output_format}")
     
     if not os.path.exists(filepath):
@@ -427,7 +427,7 @@ def plot_results(
     )
     if output_root is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        output_root = os.path.join(base_dir, "results", safe_nick)
+        output_root = os.path.join(base_dir, "results", "majsoul", safe_nick)
     os.makedirs(output_root, exist_ok=True)
     
     html_path = os.path.join(output_root, f"report_{safe_nick}.html")

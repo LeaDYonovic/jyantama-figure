@@ -121,11 +121,12 @@ python main.py --config config.example.yaml --mode mj -p 言乾 --modes 12 --lim
 
 ## 输出目录
 
-雀魂与天凤结果分开保存：
+雀魂与天凤结果按来源并列保存：
 
 ```text
-results/<nickname>/
-results/tenhou/<nickname>/
+results/
+├── majsoul/<nickname>/
+└── tenhou/<nickname>/
 ```
 
 常见文件：
@@ -137,6 +138,8 @@ results/tenhou/<nickname>/
 - `report_<nickname>.html` / `report_<nickname>.png`
 
 导出结果包含 `source` 字段，用于标识 `majsoul` 或 `tenhou`。天凤模式目录示例为 `mode_4p-south`。
+
+从旧版本升级时，请将原有的 `results/<nickname>/` 雀魂目录移动到 `results/majsoul/<nickname>/`；否则程序无法从新目录识别以前已经处理的牌谱。
 
 ## 注意事项
 
