@@ -106,11 +106,14 @@ def test_generate_html_contains_professional_sections_and_escapes_nickname(
 
     assert result == str(output_path)
     assert "&lt;测试玩家&gt;" in rendered
-    assert "Rating 走势" in rendered
-    assert "AI 一致率" in rendered
+    assert "Rating 推移" in rendered
+    assert "AI 一致率推移" in rendered
     assert "Rating 分布" in rendered
-    assert "优先复盘对局" in rendered
-    assert "10 局滚动均值" in rendered
+    assert "检讨候选" in rendered
+    assert "半庄移动平均" in rendered
+    assert '"trendWindow":10' in rendered
+    assert "观察常见水平" not in rendered
+    assert "section-note" not in rendered
     assert "趋势预测线" not in rendered
     assert "linear-gradient" not in rendered
     assert "$payload" not in rendered

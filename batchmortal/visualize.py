@@ -405,7 +405,7 @@ def _worst_game_rows(data: dict) -> str:
     for point in data["worstGames"]:
         link = _safe_external_url(point["resultUrl"]) or _safe_external_url(point["paipuUrl"])
         link_html = (
-            f'<a href="{html.escape(link, quote=True)}" target="_blank" rel="noopener">查看复盘</a>'
+            f'<a href="{html.escape(link, quote=True)}" target="_blank" rel="noopener">打开检讨</a>'
             if link
             else '<span class="muted">无链接</span>'
         )
@@ -502,8 +502,6 @@ REPORT_TEMPLATE = Template(r"""<!DOCTYPE html>
         .chart-section { padding: 34px 0 28px; border-bottom: 1px solid var(--line); }
         .section-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 18px; }
         h2 { margin: 0; font-size: 19px; letter-spacing: -.015em; }
-        .section-note { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
-        .legend-note { color: var(--subtle); font-size: 12px; white-space: nowrap; }
         .chart { width: 100%; height: 390px; }
         .secondary-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 38px; }
         .secondary-grid .chart-section { min-width: 0; }
@@ -531,7 +529,6 @@ REPORT_TEMPLATE = Template(r"""<!DOCTYPE html>
             .kpi, .kpi:first-child, .kpi:last-child { padding: 22px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
             .secondary-grid { grid-template-columns: 1fr; gap: 0; }
             .section-head { flex-direction: column; gap: 8px; }
-            .legend-note { white-space: normal; }
             footer { flex-direction: column; }
         }
         @media (max-width: 560px) {
@@ -554,19 +551,19 @@ REPORT_TEMPLATE = Template(r"""<!DOCTYPE html>
 
     <section class="kpi-grid" aria-label="关键指标">
         <article class="kpi">
-            <div class="kpi-label">分析对局</div>
+            <div class="kpi-label">半庄数</div>
             <div class="kpi-value">$total_games</div>
-            <div class="kpi-note">当前报告样本量</div>
+            <div class="kpi-note">四麻东南战</div>
         </article>
         <article class="kpi">
-            <div class="kpi-label">近$recent_window局 Rating</div>
+            <div class="kpi-label">近$recent_window半庄 Rating</div>
             <div class="kpi-value">$recent_average</div>
             <div class="kpi-note">$comparison_note</div>
         </article>
         <article class="kpi">
             <div class="kpi-label">Rating 中位数</div>
             <div class="kpi-value">$rating_median</div>
-            <div class="kpi-note">比均值更不易受极端局影响</div>
+            <div class="kpi-note">全样本</div>
         </article>
         <article class="kpi">
             <div class="kpi-label">$ai_label</div>
@@ -583,12 +580,10 @@ REPORT_TEMPLATE = Template(r"""<!DOCTYPE html>
     <section class="chart-section">
         <div class="section-head">
             <div>
-                <h2>Rating 走势</h2>
-                <p class="section-note">$rating_note</p>
+                <h2>Rating 推移</h2>
             </div>
-            <div class="legend-note">浅色圆点：单局 · 深色线：滚动均值 · 琥珀菱形：低分局</div>
         </div>
-        <div id="rating-chart" class="chart" role="img" aria-label="Rating 走势"></div>
+        <div id="rating-chart" class="chart" role="img" aria-label="Rating 推移"></div>
     </section>
 
     <div class="secondary-grid">
@@ -599,20 +594,19 @@ REPORT_TEMPLATE = Template(r"""<!DOCTYPE html>
     <section class="review-section">
         <div class="section-head">
             <div>
-                <h2>优先复盘对局</h2>
-                <p class="section-note">按 Rating 从低到高列出最多 5 局。低分只是筛选信号，应结合牌谱和决策样本判断。</p>
+                <h2>检讨候选</h2>
             </div>
         </div>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>序号</th><th>开始时间</th><th>模式</th><th>Rating</th><th>AI 一致率</th><th>5% 恶手率</th><th>操作</th></tr></thead>
+                <thead><tr><th>序号</th><th>开局时间</th><th>模式</th><th>Rating</th><th>AI 一致率</th><th>5% 恶手率</th><th>操作</th></tr></thead>
                 <tbody>$worst_rows</tbody>
             </table>
         </div>
     </section>
 
     <footer>
-        <span>Rating 与一致率用于定位复盘方向，不应单独视为牌力结论。</span>
+        <span>Rating 方差较大，仅用于筛选何切检讨，不代表牌力。</span>
         <span>生成自 Batch Mortal · 数据截至 $date_end</span>
     </footer>
 </main>
@@ -688,7 +682,7 @@ function renderRatingChart() {
     chart.group = 'batchmortal-trends';
     const series = [
         {
-            name: '单局 Rating', type: 'scatter',
+            name: '单半庄 Rating', type: 'scatter',
             data: report.points.map(function(point) {
                 return {
                     value: point.rating,
@@ -713,7 +707,7 @@ function renderRatingChart() {
     ];
     if (report.trendWindow) {
         series.push({
-            name: report.trendWindow + '局滚动均值', type: 'line', data: report.ratingRolling,
+            name: report.trendWindow + '半庄移动平均', type: 'line', data: report.ratingRolling,
             symbol: 'none', connectNulls: false, smooth: false,
             lineStyle: { color: colors.indigoDark, width: 2.5 }, z: 4
         });
@@ -743,7 +737,7 @@ function renderAiChart() {
     const chart = echarts.init(element);
     chart.group = 'batchmortal-trends';
     const series = [{
-        name: '单局一致率', type: 'scatter',
+        name: '单半庄一致率', type: 'scatter',
         data: report.points.map(function(point) { return point.aiRate; }),
         symbolSize: 6,
         itemStyle: { color: '#ffffff', borderColor: colors.indigo, borderWidth: 1.5, opacity: .72 },
@@ -756,7 +750,7 @@ function renderAiChart() {
     }];
     if (report.trendWindow) {
         series.push({
-            name: report.trendWindow + '局滚动值', type: 'line', data: report.aiRolling,
+            name: report.trendWindow + '半庄移动平均', type: 'line', data: report.aiRolling,
             symbol: 'none', smooth: false, connectNulls: false,
             lineStyle: { color: colors.indigoDark, width: 2.25 }
         });
@@ -810,7 +804,7 @@ function renderDistributionChart() {
 function renderAll() {
     if (typeof echarts === 'undefined') {
         document.querySelectorAll('.chart').forEach(function(element) {
-            element.innerHTML = '<div class="chart-error">图表资源加载失败；关键指标和复盘表仍可使用。</div>';
+            element.innerHTML = '<div class="chart-error">图表资源加载失败；关键指标和检讨表仍可使用。</div>';
         });
         window.__BATCHMORTAL_READY__ = true;
         return;
@@ -858,12 +852,12 @@ def generate_html(
 
     delta = data["comparisonDelta"]
     if delta is None:
-        comparison_note = "至少 10 局后显示前后期比较"
+        comparison_note = "至少 10 半庄后显示前后期比较"
     else:
         delta_class = "delta-up" if delta >= 0 else "delta-down"
         arrow = "↑" if delta >= 0 else "↓"
         comparison_note = (
-            f'<span class="{delta_class}">{arrow} 较前{data["comparisonWindow"]}局 '
+            f'<span class="{delta_class}">{arrow} 较前{data["comparisonWindow"]}半庄 '
             f'{abs(delta):.2f}</span>'
         )
 
@@ -873,7 +867,7 @@ def generate_html(
     elif data["aiDenominator"]:
         ai_note = f'{data["aiDenominator"]} 次决策样本'
     else:
-        ai_note = "按有值对局简单平均"
+        ai_note = "按有值半庄简单平均"
 
     if data["badRate5"] is None:
         bad_move_note = "未采集；开启 analyze_bad_move_rate 后显示"
@@ -882,26 +876,14 @@ def generate_html(
         sample_note = f' · {data["badDenominator"]} 次决策' if data["badDenominator"] else ""
         bad_move_note = strict_note + sample_note
 
-    if data["trendWindow"]:
-        rating_note = (
-            f'单局原始值与 {data["trendWindow"]} 局滚动均值；纵轴采用明确的聚焦尺度 '
-            f'{data["ratingAxisMin"]}–{data["ratingAxisMax"]}。点击数据点可打开复盘。'
-        )
-    else:
-        rating_note = (
-            f'样本少于 8 局，仅展示单局精确值；纵轴尺度 '
-            f'{data["ratingAxisMin"]}–{data["ratingAxisMax"]}。'
-        )
-
     ai_section = ""
     if data["aiRate"] is not None:
-        ai_method = "按决策数加权" if data["aiWeighted"] else "按有值对局平均"
-        ai_section = f"""
+        ai_section = """
         <section class="chart-section">
             <div class="section-head">
-                <div><h2>AI 一致率</h2><p class="section-note">独立聚焦尺度 {data["aiAxisMin"]}–100% · {ai_method}，缺失值不按 0 处理。</p></div>
+                <div><h2>AI 一致率推移</h2></div>
             </div>
-            <div id="ai-chart" class="chart" role="img" aria-label="AI 一致率走势"></div>
+            <div id="ai-chart" class="chart" role="img" aria-label="AI 一致率推移"></div>
         </section>"""
 
     distribution_section = ""
@@ -909,7 +891,7 @@ def generate_html(
         distribution_section = """
         <section class="chart-section">
             <div class="section-head">
-                <div><h2>Rating 分布</h2><p class="section-note">观察常见水平、离散程度和低分尾部。</p></div>
+                <div><h2>Rating 分布</h2></div>
             </div>
             <div id="distribution-chart" class="chart" role="img" aria-label="Rating 分布"></div>
         </section>"""
@@ -928,7 +910,6 @@ def generate_html(
         ai_note=html.escape(ai_note),
         bad_rate_5=_format_number(data["badRate5"], 1, "%"),
         bad_move_note=html.escape(bad_move_note),
-        rating_note=html.escape(rating_note),
         ai_section=ai_section,
         distribution_section=distribution_section,
         worst_rows=_worst_game_rows(data),
