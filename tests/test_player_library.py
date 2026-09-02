@@ -2,6 +2,7 @@ import json
 
 from batchmortal.paipu_import import PaipuImport
 from batchmortal.player_library import (
+    discover_local_import_files,
     discover_player_ids,
     load_player_import,
     merge_player_imports,
@@ -90,6 +91,24 @@ def test_results_only_player_is_discovered(tmp_path):
     result.write_bytes(b"placeholder")
 
     assert discover_player_ids(tmp_path / "players", tmp_path / "results") == [42]
+
+
+def test_local_discovery_only_uses_known_export_names(tmp_path):
+    app_data = tmp_path / "app-data"
+    downloads = tmp_path / "Downloads"
+    imports = app_data / "imports"
+    imports.mkdir(parents=True)
+    downloads.mkdir()
+    saved = imports / "koromo-42-20260902.json"
+    exported = downloads / "majsoul-all-100-for-windows-2026-09-02.json"
+    old_capture = downloads / "majsoul-replay-capture-2026-09-01.json"
+    unrelated = downloads / "bank-export.json"
+    for path in (saved, exported, old_capture, unrelated):
+        path.write_text("{}", encoding="utf-8")
+
+    found = discover_local_import_files(app_data, downloads)
+
+    assert set(found) == {saved.resolve(), exported.resolve(), old_capture.resolve()}
 
 
 def test_direct_account_id_uses_separate_output_name():

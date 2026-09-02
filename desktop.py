@@ -52,6 +52,7 @@ from batchmortal.koromo_browser import (
 )
 from batchmortal.player_library import (
     assign_player_id,
+    discover_local_import_files,
     discover_player_ids,
     load_player_import,
     merge_player_imports,
@@ -61,7 +62,7 @@ from batchmortal.player_library import (
 
 
 APP_NAME = "雀魂 Mortal 牌谱分析器"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA", PROJECT_ROOT))
 APP_DATA_ROOT = LOCAL_APPDATA / "MajsoulMortalDesktop"
@@ -402,7 +403,7 @@ class MortalDesktopApp:
         self.direct_file_path: Path | None = None
         self.rows: list[dict] = []
         self.current_result_path: Path | None = None
-        self.player_label_to_id: dict[str, int | None] = {}
+        self.player_list_ids: list[int | None] = []
         self.settings = self._load_settings()
 
         self._configure_style()
@@ -410,7 +411,8 @@ class MortalDesktopApp:
         self._build_menu()
         self._build_layout()
         self._draw_empty_chart()
-        self._refresh_player_selector(load_saved=True)
+        self._refresh_player_list(load_saved=True)
+        self.root.after(500, lambda: self.auto_discover_local_data(startup=True))
         self._poll_messages()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -427,7 +429,6 @@ class MortalDesktopApp:
         style.configure("Treeview", rowheight=27)
 
     def _build_variables(self):
-        self.player_selector_var = tk.StringVar(value="尚无本地玩家")
         self.direct_count_var = tk.StringVar(value="尚未导入牌谱")
         self.limit_var = tk.StringVar(value=str(self.settings.get("limit", 10)))
         self.model_var = tk.StringVar(value=self.settings.get("model", "4.1b"))
@@ -450,13 +451,10 @@ class MortalDesktopApp:
     def _build_menu(self):
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="导入本地牌谱数据…", command=self.import_paipu_file)
+        file_menu.add_command(label="导入并同步本地数据…", command=self.import_paipu_file)
         file_menu.add_command(label="从牌谱屋按 ID 导入…", command=self.open_koromo_import_dialog)
         file_menu.add_separator()
-        file_menu.add_command(
-            label="导入已有分析结果到玩家…",
-            command=self.import_results_to_player,
-        )
+        file_menu.add_command(label="自动查找本地数据", command=self.auto_discover_local_data)
         file_menu.add_command(label="打开分析结果 CSV / XLSX…", command=self.import_results)
         file_menu.add_command(label="导出当前图表…", command=self.export_chart)
         file_menu.add_separator()
@@ -499,17 +497,42 @@ class MortalDesktopApp:
 
         target = ttk.LabelFrame(sidebar, text="导入牌谱", padding=10)
         target.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(target, text="当前玩家").pack(anchor="w")
-        self.player_selector = ttk.Combobox(
-            target,
-            textvariable=self.player_selector_var,
-            state="readonly",
+        ttk.Label(target, text="玩家列表（点击切换查看）").pack(anchor="w")
+        player_list_frame = ttk.Frame(target)
+        player_list_frame.pack(fill=tk.X, pady=(2, 5))
+        self.player_listbox = tk.Listbox(
+            player_list_frame,
+            height=4,
+            exportselection=False,
+            activestyle="dotbox",
+            font=("Microsoft YaHei UI", 9),
         )
-        self.player_selector.pack(fill=tk.X, pady=(2, 7))
-        self.player_selector.bind("<<ComboboxSelected>>", self._on_player_selected)
+        self.player_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        player_scrollbar = ttk.Scrollbar(
+            player_list_frame,
+            orient=tk.VERTICAL,
+            command=self.player_listbox.yview,
+        )
+        player_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.player_listbox.configure(yscrollcommand=player_scrollbar.set)
+        self.player_listbox.bind("<<ListboxSelect>>", self._on_player_selected)
+        player_buttons = ttk.Frame(target)
+        player_buttons.pack(fill=tk.X, pady=(0, 7))
+        ttk.Button(
+            player_buttons,
+            text="自动查找数据",
+            command=self.auto_discover_local_data,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(
+            player_buttons,
+            text="刷新列表",
+            command=lambda: self._refresh_player_list(
+                select_account_id=self.direct_account_id,
+            ),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         self.import_file_button = ttk.Button(
             target,
-            text="导入本地牌谱数据…",
+            text="导入并同步本地数据…",
             style="Accent.TButton",
             command=self.import_paipu_file,
         )
@@ -520,11 +543,6 @@ class MortalDesktopApp:
             command=self.open_koromo_import_dialog,
         )
         self.koromo_import_button.pack(fill=tk.X, pady=(7, 0))
-        ttk.Label(
-            target,
-            text="可导入网页脚本 JSON，或查询牌谱屋公开段位场",
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(5, 0))
         ttk.Label(
             target,
             textvariable=self.direct_count_var,
@@ -602,15 +620,6 @@ class MortalDesktopApp:
             sidebar, text="停止", command=self.stop_analysis, state=tk.DISABLED
         )
         self.stop_button.pack(fill=tk.X, pady=(7, 0))
-        ttk.Button(sidebar, text="打开已有分析结果…", command=self.import_results).pack(
-            fill=tk.X, pady=(7, 0)
-        )
-        ttk.Button(
-            sidebar,
-            text="导入已有结果到玩家…",
-            command=self.import_results_to_player,
-        ).pack(fill=tk.X, pady=(7, 0))
-
         ttk.Separator(sidebar).pack(fill=tk.X, pady=12)
         ttk.Label(sidebar, textvariable=self.status_var, wraplength=280).pack(anchor="w")
         self.progress = ttk.Progressbar(sidebar, mode="indeterminate")
@@ -756,7 +765,9 @@ class MortalDesktopApp:
             "analysis_mode": self.analysis_mode_var.get(),
             "koromo_player_id": str(self.settings.get("koromo_player_id", "")),
             "active_player_id": self.direct_account_id,
+            "discovered_files": self.settings.get("discovered_files", {}),
         }
+        self.settings.update(payload)
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _active_result_path(self) -> Path:
@@ -769,7 +780,7 @@ class MortalDesktopApp:
         suffix = f"{count} 局牌谱" if count is not None else "仅有分析结果"
         return f"玩家 ID {account_id} · {suffix}"
 
-    def _refresh_player_selector(
+    def _refresh_player_list(
         self,
         *,
         select_account_id: int | None = None,
@@ -777,7 +788,7 @@ class MortalDesktopApp:
     ):
         ids = discover_player_ids(PLAYER_LIBRARY_ROOT, RESULTS_ROOT)
         labels: list[str] = []
-        mapping: dict[str, int | None] = {}
+        player_ids: list[int | None] = []
         for account_id in ids:
             imported = None
             try:
@@ -789,19 +800,20 @@ class MortalDesktopApp:
                 len(imported.urls) if imported is not None else None,
             )
             labels.append(label)
-            mapping[label] = account_id
+            player_ids.append(account_id)
 
         if DIRECT_RESULTS_PATH.is_file():
-            legacy_label = "未分组 / 旧数据"
-            labels.append(legacy_label)
-            mapping[legacy_label] = None
+            labels.append("未分组 / 旧数据")
+            player_ids.append(None)
 
         if not labels:
             labels = ["尚无本地玩家"]
-            mapping[labels[0]] = None
+            player_ids = []
 
-        self.player_label_to_id = mapping
-        self.player_selector.configure(values=labels)
+        self.player_list_ids = player_ids
+        self.player_listbox.delete(0, tk.END)
+        for label in labels:
+            self.player_listbox.insert(tk.END, label)
 
         desired_id = select_account_id
         if load_saved and desired_id is None:
@@ -810,13 +822,20 @@ class MortalDesktopApp:
                 desired_id = int(saved) if saved else None
             except (TypeError, ValueError):
                 desired_id = None
-        desired_label = next(
-            (label for label, account_id in mapping.items() if account_id == desired_id),
-            labels[0],
+        desired_index = next(
+            (
+                index
+                for index, account_id in enumerate(player_ids)
+                if account_id == desired_id
+            ),
+            0,
         )
-        self.player_selector_var.set(desired_label)
-        if load_saved and desired_label != "尚无本地玩家":
-            self._load_player_selection(mapping[desired_label])
+        if player_ids:
+            self.player_listbox.selection_set(desired_index)
+            self.player_listbox.activate(desired_index)
+            self.player_listbox.see(desired_index)
+        if load_saved and player_ids:
+            self._load_player_selection(player_ids[desired_index])
 
     def _on_player_selected(self, _event=None):
         if self.process is not None or self.koromo_download_running:
@@ -825,13 +844,117 @@ class MortalDesktopApp:
                 "请先等待当前任务结束，再切换玩家。",
                 parent=self.root,
             )
-            self._refresh_player_selector(select_account_id=self.direct_account_id)
+            self._refresh_player_list(select_account_id=self.direct_account_id)
             return
-        label = self.player_selector_var.get()
-        if label == "尚无本地玩家":
+        selection = self.player_listbox.curselection()
+        if not selection or selection[0] >= len(self.player_list_ids):
             return
-        self._load_player_selection(self.player_label_to_id.get(label))
+        self._load_player_selection(self.player_list_ids[selection[0]])
         self._save_settings()
+
+    @staticmethod
+    def _local_file_signature(path: Path) -> str:
+        stat = path.stat()
+        return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+    def auto_discover_local_data(self, startup: bool = False):
+        if self.process is not None or self.koromo_download_running:
+            if not startup:
+                messagebox.showinfo(
+                    "任务正在运行",
+                    "请等待当前导入或分析结束后再查找本地数据。",
+                    parent=self.root,
+                )
+            return
+
+        candidates = discover_local_import_files(APP_DATA_ROOT, Path.home() / "Downloads")
+        known = self.settings.get("discovered_files")
+        if not isinstance(known, dict):
+            known = {}
+        force = not startup
+        imported_files = 0
+        imported_ids: set[int] = set()
+        failed: list[str] = []
+        sensitive_files = 0
+        for path in candidates:
+            try:
+                signature = self._local_file_signature(path)
+            except OSError as exc:
+                failed.append(f"{path.name}：{exc}")
+                continue
+            path_key = str(path)
+            if not force and known.get(path_key) == signature:
+                continue
+            try:
+                imported = read_paipu_import(path)
+                if imported.account_id is None:
+                    raise ValueError("无法自动确定玩家 ID")
+                merged, _ = self._store_player_import(imported)
+                self._adopt_legacy_results_for_player(merged)
+                result_path = player_result_path(RESULTS_ROOT, merged.account_id)
+                if result_path.is_file():
+                    backfill_result_metadata(
+                        str(result_path),
+                        "xlsx",
+                        _imported_metadata_by_uuid(
+                            merged.records,
+                            merged.account_id,
+                        ),
+                    )
+                imported_files += 1
+                imported_ids.add(merged.account_id)
+                sensitive_files += int(imported.contains_login_frames)
+                known[path_key] = signature
+                self._log(
+                    f"[自动查找] {path.name} → 玩家 ID {merged.account_id}，"
+                    f"本地库共 {len(merged.urls)} 局。"
+                )
+            except (OSError, UnicodeError, ValueError) as exc:
+                known[path_key] = signature
+                failed.append(f"{path.name}：{exc}")
+                self._log(f"[自动查找] 跳过 {path.name}：{exc}")
+
+        self.settings["discovered_files"] = known
+        preferred_id = self.direct_account_id
+        if preferred_id is None and imported_ids:
+            preferred_id = sorted(imported_ids)[0]
+        self._refresh_player_list(select_account_id=preferred_id)
+        if preferred_id is not None:
+            self._load_player_selection(preferred_id)
+        self._save_settings()
+
+        if imported_files:
+            self.status_var.set(
+                f"已自动同步 {len(imported_ids)} 位玩家的 {imported_files} 个本地文件"
+            )
+        if startup:
+            if sensitive_files:
+                self._log(
+                    f"[自动查找] 发现 {sensitive_files} 个旧抓包；只把安全牌谱字段写入玩家库。"
+                )
+            return
+
+        if not candidates:
+            messagebox.showinfo(
+                "没有找到本地数据",
+                "程序已检查自己的固定数据目录和系统“下载”文件夹，"
+                "没有发现本工具生成的牌谱 JSON。",
+                parent=self.root,
+            )
+            return
+        summary = (
+            f"已检查 {len(candidates)} 个本工具生成的 JSON，"
+            f"同步 {imported_files} 个文件、{len(imported_ids)} 位玩家。"
+        )
+        if failed:
+            details = "\n".join(failed[:6])
+            messagebox.showwarning(
+                "本地数据查找完成",
+                f"{summary}\n\n以下文件无法自动归入玩家：\n{details}",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo("本地数据查找完成", summary, parent=self.root)
 
     def _clear_result_view(self):
         self.rows = []
@@ -960,9 +1083,9 @@ class MortalDesktopApp:
                 parent=self.root,
             )
             return
-        filename = filedialog.askopenfilename(
+        filenames = filedialog.askopenfilenames(
             parent=self.root,
-            title="导入雀魂牌谱",
+            title="导入一个或多个本地牌谱文件",
             filetypes=[
                 ("雀魂脚本导出文件", "*.json *.txt"),
                 ("JSON 文件", "*.json"),
@@ -970,34 +1093,59 @@ class MortalDesktopApp:
                 ("所有文件", "*.*"),
             ],
         )
-        if not filename:
+        if not filenames:
             return
-        try:
-            imported = read_paipu_import(filename)
-        except (OSError, UnicodeError, ValueError) as exc:
-            messagebox.showerror("无法导入牌谱", str(exc), parent=self.root)
-            return
+        imported_count = 0
+        failed: list[str] = []
+        contains_login_frames = False
+        for filename in filenames:
+            try:
+                imported = read_paipu_import(filename)
+            except (OSError, UnicodeError, ValueError) as exc:
+                failed.append(f"{Path(filename).name}：{exc}")
+                continue
 
-        if imported.account_id is None:
-            entered_id = simpledialog.askstring(
-                "归入玩家",
-                "这个文件没有可识别的玩家 ID。\n\n"
-                "请输入要归入的雀魂玩家 ID；点击取消则作为未分组临时数据使用。",
-                parent=self.root,
-            )
-            if entered_id:
+            if imported.account_id is None:
+                entered_id = simpledialog.askstring(
+                    "归入玩家",
+                    f"{Path(filename).name} 没有可识别的玩家 ID。\n\n"
+                    "请输入要归入的雀魂玩家 ID；点击取消会跳过这个文件。",
+                    parent=self.root,
+                )
+                if not entered_id:
+                    failed.append(f"{Path(filename).name}：未指定玩家 ID")
+                    continue
                 try:
                     imported = assign_player_id(imported, entered_id)
                 except ValueError as exc:
-                    messagebox.showerror("玩家 ID 无效", str(exc), parent=self.root)
-                    return
+                    failed.append(f"{Path(filename).name}：{exc}")
+                    continue
 
-        self._apply_paipu_import(imported, Path(filename).name, persist=True)
-        if imported.contains_login_frames:
+            try:
+                self._apply_paipu_import(imported, Path(filename).name, persist=True)
+                imported_count += 1
+                contains_login_frames |= imported.contains_login_frames
+            except Exception as exc:
+                failed.append(f"{Path(filename).name}：{exc}")
+
+        if contains_login_frames:
             messagebox.showwarning(
                 "旧抓包含登录帧",
                 "已仅在本机内存中提取最近牌谱，登录帧不会写入分析结果。\n\n"
                 "这个旧 JSON 可能包含 OAuth/access token，请勿分享，用完后建议删除。",
+                parent=self.root,
+            )
+        if imported_count:
+            self.status_var.set(
+                f"已同步 {imported_count} 个本地文件，玩家列表已更新"
+            )
+        if failed:
+            details = "\n".join(failed[:8])
+            if len(failed) > 8:
+                details += f"\n……另有 {len(failed) - 8} 个文件"
+            messagebox.showwarning(
+                "部分文件未导入",
+                f"已成功同步 {imported_count} 个文件；{len(failed)} 个未导入。\n\n{details}",
                 parent=self.root,
             )
 
@@ -1037,7 +1185,7 @@ class MortalDesktopApp:
             self._clear_result_view()
         self._refresh_direct_preflight()
         if refresh_selector:
-            self._refresh_player_selector(select_account_id=imported.account_id)
+            self._refresh_player_list(select_account_id=imported.account_id)
         if library_path is not None:
             self._log(
                 f"[玩家库] 玩家 ID {imported.account_id} 已保存，共 "
@@ -1158,7 +1306,7 @@ class MortalDesktopApp:
     ):
         self.koromo_download_running = True
         self.koromo_cancel_event = threading.Event()
-        self.player_selector.configure(state=tk.DISABLED)
+        self.player_listbox.configure(state=tk.DISABLED)
         self.koromo_import_button.configure(state=tk.DISABLED)
         self.import_file_button.configure(state=tk.DISABLED)
         self.start_button.configure(state=tk.DISABLED)
@@ -1219,7 +1367,7 @@ class MortalDesktopApp:
     def _finish_koromo_import_ui(self):
         self.koromo_download_running = False
         self.koromo_cancel_event = None
-        self.player_selector.configure(state="readonly")
+        self.player_listbox.configure(state=tk.NORMAL)
         self.progress.stop()
         self.koromo_import_button.configure(state=tk.NORMAL)
         self.import_file_button.configure(state=tk.NORMAL)
@@ -1581,7 +1729,7 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.refresh_pt_button.configure(state=tk.DISABLED)
-        self.player_selector.configure(state=tk.DISABLED)
+        self.player_listbox.configure(state=tk.DISABLED)
 
         env = os.environ.copy()
         env["BATCHMORTAL_RESULTS_ROOT"] = str(RESULTS_ROOT)
@@ -1741,7 +1889,7 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.refresh_pt_button.configure(state=tk.NORMAL)
-        self.player_selector.configure(state="readonly")
+        self.player_listbox.configure(state=tk.NORMAL)
         self._reload_latest_result()
         if self.direct_urls:
             self._refresh_direct_preflight(update_status=False)
@@ -1758,7 +1906,7 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.refresh_pt_button.configure(state=tk.NORMAL)
-        self.player_selector.configure(state="readonly")
+        self.player_listbox.configure(state=tk.NORMAL)
         self._reload_latest_result()
         if self.direct_urls:
             self._refresh_direct_preflight(update_status=False)
@@ -1859,7 +2007,7 @@ class MortalDesktopApp:
             else:
                 new_rows = []
             self.direct_account_id = account_id
-            self._refresh_player_selector(select_account_id=account_id)
+            self._refresh_player_list(select_account_id=account_id)
             self._load_player_selection(account_id)
             self._save_settings()
         except Exception as exc:

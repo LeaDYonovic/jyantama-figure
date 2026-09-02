@@ -7,7 +7,9 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 & $venvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "更新 pip 失败（退出码 $LASTEXITCODE）" }
 & $venvPython -m pip install -r requirements-dev.txt
+if ($LASTEXITCODE -ne 0) { throw "安装构建依赖失败（退出码 $LASTEXITCODE）" }
 
 & $venvPython -m PyInstaller `
     --noconfirm `
@@ -18,6 +20,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     --collect-all seleniumbase `
     --collect-all openpyxl `
     main.py
+if ($LASTEXITCODE -ne 0) { throw "构建 batchmortal-cli.exe 失败（退出码 $LASTEXITCODE）" }
 
 & $venvPython -m PyInstaller `
     --noconfirm `
@@ -28,6 +31,7 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     --collect-all matplotlib `
     --collect-all openpyxl `
     desktop.py
+if ($LASTEXITCODE -ne 0) { throw "构建 MajsoulMortalDesktop.exe 失败（退出码 $LASTEXITCODE）" }
 
 $distPath = Join-Path $PSScriptRoot "dist"
 $readmeCopy = Join-Path $distPath "README.md"

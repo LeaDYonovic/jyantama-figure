@@ -10,6 +10,11 @@ from batchmortal.paipu_import import SAFE_EXPORT_SCHEMA, PaipuImport, read_paipu
 
 
 PLAYER_DIRECTORY_PREFIX = "玩家_"
+DOWNLOAD_IMPORT_PATTERNS = (
+    "majsoul-*.json",
+    "koromo-bridge-*.json",
+    "雀魂*.json",
+)
 
 
 def normalize_account_id(value: int | str | None) -> int:
@@ -63,6 +68,23 @@ def discover_player_ids(
                 ):
                     player_ids.add(int(suffix))
     return sorted(player_ids)
+
+
+def discover_local_import_files(
+    app_data_root: str | Path,
+    downloads_root: str | Path,
+) -> list[Path]:
+    """Find files produced by this project without scanning unrelated JSON files."""
+    candidates: set[Path] = set()
+    imports_root = Path(app_data_root) / "imports"
+    if imports_root.is_dir():
+        candidates.update(path.resolve() for path in imports_root.glob("*.json") if path.is_file())
+
+    downloads = Path(downloads_root)
+    if downloads.is_dir():
+        for pattern in DOWNLOAD_IMPORT_PATTERNS:
+            candidates.update(path.resolve() for path in downloads.glob(pattern) if path.is_file())
+    return sorted(candidates, key=lambda path: (path.stat().st_mtime_ns, str(path)))
 
 
 def _record_key(record: dict) -> str:
