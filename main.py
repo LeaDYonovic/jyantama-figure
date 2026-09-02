@@ -183,7 +183,7 @@ def parse_args():
         dest="review_ui",
     )
     analysis_group.add_argument(
-        "--retry", type=int, default=config.get("retry", 3), help="Retry failed review items this many times"
+        "--retry", type=int, default=config.get("retry", 1), help="Retry failed review items this many times"
     )
     analyze_bad_move_rate_default = bool(config.get("analyze_bad_move_rate", False))
     analysis_group.add_argument(
@@ -206,6 +206,14 @@ def parse_args():
     )
     browser_group.add_argument(
         "--proxy", default=config.get("proxy"), help="Proxy URL (e.g. http://127.0.0.1:7890)"
+    )
+    browser_group.add_argument(
+        "--verification-timeout",
+        "--verification_timeout",
+        type=float,
+        default=config.get("verification_timeout"),
+        help="Seconds to wait for the site's Turnstile widget (default: 180 visible, 45 headless)",
+        dest="verification_timeout",
     )
 
     # -- Output Options --
@@ -247,10 +255,10 @@ def parse_args():
         dest="unsafe_parallel_review"
     )
     submit_group.add_argument(
-        "--submit-interval", "--submit_interval", type=float, default=config.get("submit_interval", 6.0), help="Minimum spacing between controlled submissions in seconds", dest="submit_interval"
+        "--submit-interval", "--submit_interval", type=float, default=config.get("submit_interval", 10.0), help="Minimum spacing between controlled submissions in seconds", dest="submit_interval"
     )
     submit_group.add_argument(
-        "--submit-cooldown", "--submit_cooldown", type=float, default=config.get("submit_cooldown", 30.0), help="Cooldown seconds after repeated review failures", dest="submit_cooldown"
+        "--submit-cooldown", "--submit_cooldown", type=float, default=config.get("submit_cooldown", 120.0), help="Cooldown seconds after repeated review failures", dest="submit_cooldown"
     )
     prewarm_standby_default = config.get("prewarm_standby", False)
     submit_group.add_argument(
@@ -539,6 +547,10 @@ def print_summary(args, modes):
     log_line(f"  Language:  {args.review_language}")
     log_line(f"  ReviewUI:  {args.review_ui}")
     log_line(f"  Headless:  {args.headless}")
+    log_line(
+        "  Verify:    "
+        + ("passive/headless" if args.headless else "visible Chrome; manual action allowed")
+    )
     log_line(f"  DryRun:    {args.dry_run}")
     log_line(f"  Retry:     {args.retry}")
     log_line(f"  BadMove:   {args.analyze_bad_move_rate}")
@@ -967,13 +979,14 @@ def main():
                 proxy=proxy,
                 review_language=args.review_language,
                 review_ui=args.review_ui,
+                verification_timeout=args.verification_timeout,
                 submission_coordinator=None,
                 controlled_submission=False,
             )
             total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator, analysis_stats)
         elif args.prewarm_standby and len(tasks) >= 2:
             submission_coordinator = ReviewSubmissionCoordinator(
-                base_interval=min(args.submit_interval, 1.0),
+                base_interval=args.submit_interval,
                 cooldown_seconds=args.submit_cooldown,
             )
             automator = BrowserAutomator(
@@ -983,6 +996,7 @@ def main():
                 review_ui=args.review_ui,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
+                verification_timeout=args.verification_timeout,
             )
             total_processed, total_failed = run_controlled_pipeline_analysis(args, tasks, out_path, automator, analysis_stats)
         else:
@@ -997,6 +1011,7 @@ def main():
                 review_ui=args.review_ui,
                 submission_coordinator=submission_coordinator,
                 controlled_submission=True,
+                verification_timeout=args.verification_timeout,
             )
             total_processed, total_failed = run_parallel_analysis(args, tasks, out_path, automator, analysis_stats)
 

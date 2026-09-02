@@ -40,7 +40,7 @@ from batchmortal.paipu_import import normalize_majsoul_paipu_input, read_paipu_i
 
 
 APP_NAME = "雀魂 Mortal 牌谱分析器"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA", PROJECT_ROOT))
 APP_DATA_ROOT = LOCAL_APPDATA / "MajsoulMortalDesktop"
@@ -537,7 +537,7 @@ class MortalDesktopApp:
         ).pack(anchor="w")
         ttk.Checkbutton(
             options,
-            text="后台运行 Chrome（验证失败时关闭）",
+            text="后台运行 Chrome（无法手动完成人机验证）",
             variable=self.headless_var,
         ).pack(anchor="w", pady=(4, 0))
 
@@ -1112,6 +1112,10 @@ class MortalDesktopApp:
             f"剩余 {len(pending_urls)} 局，本次分析 {len(selected_urls)} 局。"
         )
         self._log("直接使用已导入牌谱；无需访问牌谱屋。")
+        if self.headless_var.get():
+            self._log("[验证] Chrome 在后台运行；若 Turnstile 要求人工操作，本次会暂停并提示重试。")
+        else:
+            self._log("[验证] 请保留 Chrome 窗口；出现人机验证时手动完成，程序会自动继续。")
         self.tabs.select(2)
         self.status_var.set("正在分析牌谱…")
         self.progress.start(12)

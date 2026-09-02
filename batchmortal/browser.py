@@ -8,6 +8,12 @@ from collections import deque
 from seleniumbase import SB
 
 from batchmortal.control import check_stop_requested
+from batchmortal.verification import (
+    ReviewVerificationError,
+    raise_for_review_access_error,
+    turnstile_timeout_message,
+    turnstile_token_ready,
+)
 
 REVIEW_BASE_URL = "https://mjai.ekyu.moe"
 DEFAULT_REVIEW_LANGUAGE = "zh-CN"
@@ -231,9 +237,9 @@ def build_review_url(language):
 class ReviewSubmissionCoordinator:
     def __init__(
         self,
-        base_interval=6.0,
-        max_interval=20.0,
-        cooldown_seconds=30.0,
+        base_interval=10.0,
+        max_interval=60.0,
+        cooldown_seconds=120.0,
         failure_threshold=2,
     ):
         self.base_interval = base_interval
@@ -339,12 +345,18 @@ class BrowserAutomator:
         controlled_submission=True,
         review_language=DEFAULT_REVIEW_LANGUAGE,
         review_ui=DEFAULT_REVIEW_UI,
+        verification_timeout=None,
     ):
         self.headless = headless
         self.proxy = proxy
         self.review_language = normalize_review_language(review_language)
         self.review_ui = normalize_review_ui(review_ui)
         self.review_url = build_review_url(self.review_language)
+        default_verification_timeout = 45.0 if headless else 180.0
+        self.verification_timeout = max(
+            10.0,
+            float(verification_timeout or default_verification_timeout),
+        )
         self.controlled_submission = controlled_submission
         if controlled_submission:
             self.submission_coordinator = submission_coordinator or ReviewSubmissionCoordinator()
@@ -597,10 +609,13 @@ class BrowserAutomator:
             else:
                 logging.info(f"{log_prefix} Unthrottled mode, starting Turnstile")
             self._prepare_review_form(sb)
-            self._poke_captcha(sb)
 
             token_started_at = time.perf_counter()
-            self._wait_for_turnstile_token(sb, log_prefix, timeout=35)
+            self._wait_for_turnstile_token(
+                sb,
+                log_prefix,
+                timeout=self.verification_timeout,
+            )
             token_wait_seconds = time.perf_counter() - token_started_at
             logging.info(f"{log_prefix} Turnstile token ready in {token_wait_seconds:.1f}s")
 
@@ -753,7 +768,11 @@ class BrowserAutomator:
 
         logging.info(f"{log_prefix} {slot['name']} tab entering Turnstile")
         token_started_at = time.perf_counter()
-        self._wait_for_turnstile_token(sb, log_prefix, timeout=35)
+        self._wait_for_turnstile_token(
+            sb,
+            log_prefix,
+            timeout=self.verification_timeout,
+        )
         token_wait_seconds = time.perf_counter() - token_started_at
         logging.info(f"{log_prefix} Turnstile token ready in {token_wait_seconds:.1f}s")
 
@@ -886,7 +905,6 @@ class BrowserAutomator:
         self._open_fresh_review_page(sb, log_prefix)
         self._populate_form(sb, task["paipu_url"], task["model_tag"])
         self._prepare_review_form(sb)
-        self._poke_captcha(sb)
 
     def _prime_rotation_slot(self, sb, slot, label):
         if not slot.get("handle"):
@@ -1082,34 +1100,40 @@ class BrowserAutomator:
             raise RuntimeError("Could not populate review form")
 
     def _wait_for_turnstile_token(self, sb, log_prefix, timeout):
-        deadline = time.time() + timeout
-        next_poke_at = time.time() + 8
-        recoveries = 0
+        started_at = time.monotonic()
+        deadline = started_at + timeout
+        guidance_logged = False
 
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             check_stop_requested()
             state = self._read_review_state(sb)
-            if state["token_length"] > 0:
+            if turnstile_token_ready(state):
                 return
 
-            if state["page_text"] and (
-                "invalid captcha response" in state["page_text"]
-                or "timeout-or-duplicate" in state["page_text"]
-            ):
-                raise RuntimeError(f"{log_prefix} Turnstile token was rejected before submission")
+            raise_for_review_access_error(state.get("page_text", ""), log_prefix)
 
-            if time.time() >= next_poke_at:
-                recoveries += 1
-                logging.info(f"{log_prefix} Turnstile token still missing, retrying captcha click")
-                self._recover_turnstile_widget(sb)
-                self._poke_captcha(sb)
-                if recoveries >= 2:
-                    raise RuntimeError(f"{log_prefix} Turnstile widget stalled before token issuance")
-                next_poke_at = time.time() + 8
+            if not guidance_logged and time.monotonic() - started_at >= 2:
+                if self.headless:
+                    logging.warning(
+                        f"{log_prefix} Turnstile is waiting. Headless Chrome cannot accept "
+                        "manual verification; disable background mode if this continues."
+                    )
+                else:
+                    logging.info(
+                        f"{log_prefix} If Chrome shows a human-verification prompt, "
+                        "complete it in that window; analysis will resume automatically."
+                    )
+                guidance_logged = True
 
             time.sleep(0.5)
 
-        raise RuntimeError(f"{log_prefix} Timed out waiting for Turnstile token")
+        raise ReviewVerificationError(
+            turnstile_timeout_message(
+                log_prefix,
+                interactive=not self.headless,
+                timeout=timeout,
+            )
+        )
 
     def _submit_review(self, sb, log_prefix):
         submitted = sb.execute_script(
@@ -1157,11 +1181,7 @@ class BrowserAutomator:
             if REPORT_URL_FRAGMENT in current_url and current_url != self.review_url:
                 return
 
-            if "invalid captcha response" in page_text or "timeout-or-duplicate" in page_text:
-                raise RuntimeError(f"{log_prefix} Turnstile token was rejected")
-
-            if "too many requests" in page_text or "rate limit" in page_text:
-                raise RuntimeError(f"{log_prefix} Review site rate limited this request")
+            raise_for_review_access_error(page_text, log_prefix)
 
             _raise_for_review_input_error(page_text, log_prefix)
 
@@ -1420,11 +1440,7 @@ class BrowserAutomator:
             state = self._read_review_state(sb)
             page_text = state["page_text"]
 
-            if "invalid captcha response" in page_text or "timeout-or-duplicate" in page_text:
-                raise RuntimeError(f"{log_prefix} Turnstile token was rejected")
-
-            if "too many requests" in page_text or "rate limit" in page_text:
-                raise RuntimeError(f"{log_prefix} Review site rate limited this request")
+            raise_for_review_access_error(page_text, log_prefix)
 
             _raise_for_review_input_error(page_text, log_prefix)
 
@@ -1474,46 +1490,3 @@ class BrowserAutomator:
                 time.sleep(0.5)
         except Exception as exc:
             logging.warning(f"{log_prefix} Could not expand metadata menu: {exc}")
-
-    def _poke_captcha(self, sb):
-        try:
-            sb.uc_gui_click_captcha()
-        except Exception:
-            pass
-
-    def _recover_turnstile_widget(self, sb):
-        try:
-            sb.execute_script(
-                """
-                const token = document.querySelector(arguments[0]);
-                if (token) {
-                  token.value = '';
-                }
-
-                const submit = document.querySelector(arguments[1]);
-                if (submit) {
-                  submit.disabled = false;
-                  submit.classList.remove('is-loading');
-                  submit.style.pointerEvents = '';
-                }
-
-                if (window.turnstile) {
-                  const widgets = Array.from(document.querySelectorAll('.cf-turnstile'));
-                  for (const widget of widgets) {
-                    const widgetId = widget.getAttribute('data-widget-id');
-                    try {
-                      if (widgetId) {
-                        window.turnstile.reset(widgetId);
-                      } else {
-                        window.turnstile.reset();
-                      }
-                    } catch (e) {
-                    }
-                  }
-                }
-                """,
-                TURNSTILE_RESPONSE_SELECTOR,
-                SUBMIT_SELECTOR,
-            )
-        except Exception:
-            pass
