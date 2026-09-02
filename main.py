@@ -299,6 +299,8 @@ def parse_args():
         direct_source = load_direct_paipu_source(args.paipu_url, args.paipu_file)
         args.direct_paipu_urls = direct_source.urls
         args.direct_paipu_records = direct_source.records
+        if args.account_id is None and direct_source.account_id is not None:
+            args.account_id = direct_source.account_id
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -315,13 +317,25 @@ def parse_args():
             "or --paipu-url/--paipu-file"
         )
         
-    args.target_name = (
-        args.player
-        if args.player
-        else ("直接牌谱" if args.direct_paipu_urls else str(args.account_id))
+    args.target_name = resolve_target_name(
+        args.player,
+        args.direct_paipu_urls,
+        args.account_id,
     )
         
     return args
+
+
+def resolve_target_name(
+    player: str | None,
+    direct_paipu_urls: list[str],
+    account_id: int | None,
+) -> str:
+    if player:
+        return player
+    if direct_paipu_urls:
+        return f"玩家_{account_id}" if account_id else "直接牌谱"
+    return str(account_id)
 
 
 def load_direct_paipu_source(
@@ -641,6 +655,7 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     base_row = {
         "nickname": args.target_name,
+        "accountId": getattr(args, "account_id", None) or "",
         "source": task.get("source", args.source),
         "mode": task["mode"],
         "recordType": task.get("record_type", "unknown"),

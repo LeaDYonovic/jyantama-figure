@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import matplotlib
 
@@ -33,6 +33,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from batchmortal.results import (
+    ResultWriter,
     backfill_result_metadata,
     get_processed_uuids,
     read_result_rows,
@@ -49,15 +50,24 @@ from batchmortal.koromo_browser import (
     wait_for_koromo_bridge_export,
     write_koromo_export,
 )
+from batchmortal.player_library import (
+    assign_player_id,
+    discover_player_ids,
+    load_player_import,
+    merge_player_imports,
+    player_result_path,
+    save_player_import,
+)
 
 
 APP_NAME = "雀魂 Mortal 牌谱分析器"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA", PROJECT_ROOT))
 APP_DATA_ROOT = LOCAL_APPDATA / "MajsoulMortalDesktop"
 RESULTS_ROOT = APP_DATA_ROOT / "results"
 KOROMO_IMPORTS_ROOT = APP_DATA_ROOT / "imports"
+PLAYER_LIBRARY_ROOT = APP_DATA_ROOT / "players"
 SETTINGS_PATH = APP_DATA_ROOT / "settings.json"
 DIRECT_RESULTS_PATH = RESULTS_ROOT / "majsoul" / "直接牌谱" / "results.xlsx"
 RANKED_ROOM_LABELS = {
@@ -168,6 +178,7 @@ def _imported_metadata_by_uuid(
         except ValueError:
             continue
         metadata_by_uuid[direct_id] = {
+            "accountId": account_id or "",
             "mode": record.get("mode_id", record.get("modeId", "")),
             "recordType": record.get("record_type", record.get("recordType", "unknown")),
             "paipuUrl": normalized_url,
@@ -375,6 +386,7 @@ class MortalDesktopApp:
 
         APP_DATA_ROOT.mkdir(parents=True, exist_ok=True)
         RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+        PLAYER_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
 
         self.message_queue: queue.Queue = queue.Queue()
         self.process: subprocess.Popen | None = None
@@ -390,6 +402,7 @@ class MortalDesktopApp:
         self.direct_file_path: Path | None = None
         self.rows: list[dict] = []
         self.current_result_path: Path | None = None
+        self.player_label_to_id: dict[str, int | None] = {}
         self.settings = self._load_settings()
 
         self._configure_style()
@@ -397,6 +410,7 @@ class MortalDesktopApp:
         self._build_menu()
         self._build_layout()
         self._draw_empty_chart()
+        self._refresh_player_selector(load_saved=True)
         self._poll_messages()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -413,6 +427,7 @@ class MortalDesktopApp:
         style.configure("Treeview", rowheight=27)
 
     def _build_variables(self):
+        self.player_selector_var = tk.StringVar(value="尚无本地玩家")
         self.direct_count_var = tk.StringVar(value="尚未导入牌谱")
         self.limit_var = tk.StringVar(value=str(self.settings.get("limit", 10)))
         self.model_var = tk.StringVar(value=self.settings.get("model", "4.1b"))
@@ -435,9 +450,13 @@ class MortalDesktopApp:
     def _build_menu(self):
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="导入牌谱 JSON / TXT…", command=self.import_paipu_file)
+        file_menu.add_command(label="导入本地牌谱数据…", command=self.import_paipu_file)
         file_menu.add_command(label="从牌谱屋按 ID 导入…", command=self.open_koromo_import_dialog)
         file_menu.add_separator()
+        file_menu.add_command(
+            label="导入已有分析结果到玩家…",
+            command=self.import_results_to_player,
+        )
         file_menu.add_command(label="打开分析结果 CSV / XLSX…", command=self.import_results)
         file_menu.add_command(label="导出当前图表…", command=self.export_chart)
         file_menu.add_separator()
@@ -480,9 +499,17 @@ class MortalDesktopApp:
 
         target = ttk.LabelFrame(sidebar, text="导入牌谱", padding=10)
         target.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(target, text="当前玩家").pack(anchor="w")
+        self.player_selector = ttk.Combobox(
+            target,
+            textvariable=self.player_selector_var,
+            state="readonly",
+        )
+        self.player_selector.pack(fill=tk.X, pady=(2, 7))
+        self.player_selector.bind("<<ComboboxSelected>>", self._on_player_selected)
         self.import_file_button = ttk.Button(
             target,
-            text="导入牌谱 JSON / TXT…",
+            text="导入本地牌谱数据…",
             style="Accent.TButton",
             command=self.import_paipu_file,
         )
@@ -578,6 +605,11 @@ class MortalDesktopApp:
         ttk.Button(sidebar, text="打开已有分析结果…", command=self.import_results).pack(
             fill=tk.X, pady=(7, 0)
         )
+        ttk.Button(
+            sidebar,
+            text="导入已有结果到玩家…",
+            command=self.import_results_to_player,
+        ).pack(fill=tk.X, pady=(7, 0))
 
         ttk.Separator(sidebar).pack(fill=tk.X, pady=12)
         ttk.Label(sidebar, textvariable=self.status_var, wraplength=280).pack(anchor="w")
@@ -723,15 +755,187 @@ class MortalDesktopApp:
             "headless": self.headless_var.get(),
             "analysis_mode": self.analysis_mode_var.get(),
             "koromo_player_id": str(self.settings.get("koromo_player_id", "")),
+            "active_player_id": self.direct_account_id,
         }
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _active_result_path(self) -> Path:
+        if self.direct_account_id:
+            return player_result_path(RESULTS_ROOT, self.direct_account_id)
+        return DIRECT_RESULTS_PATH
+
+    @staticmethod
+    def _player_label(account_id: int, count: int | None) -> str:
+        suffix = f"{count} 局牌谱" if count is not None else "仅有分析结果"
+        return f"玩家 ID {account_id} · {suffix}"
+
+    def _refresh_player_selector(
+        self,
+        *,
+        select_account_id: int | None = None,
+        load_saved: bool = False,
+    ):
+        ids = discover_player_ids(PLAYER_LIBRARY_ROOT, RESULTS_ROOT)
+        labels: list[str] = []
+        mapping: dict[str, int | None] = {}
+        for account_id in ids:
+            imported = None
+            try:
+                imported = load_player_import(PLAYER_LIBRARY_ROOT, account_id)
+            except (OSError, UnicodeError, ValueError) as exc:
+                self._log(f"[玩家库] 无法读取玩家 {account_id} 的牌谱库：{exc}")
+            label = self._player_label(
+                account_id,
+                len(imported.urls) if imported is not None else None,
+            )
+            labels.append(label)
+            mapping[label] = account_id
+
+        if DIRECT_RESULTS_PATH.is_file():
+            legacy_label = "未分组 / 旧数据"
+            labels.append(legacy_label)
+            mapping[legacy_label] = None
+
+        if not labels:
+            labels = ["尚无本地玩家"]
+            mapping[labels[0]] = None
+
+        self.player_label_to_id = mapping
+        self.player_selector.configure(values=labels)
+
+        desired_id = select_account_id
+        if load_saved and desired_id is None:
+            saved = self.settings.get("active_player_id")
+            try:
+                desired_id = int(saved) if saved else None
+            except (TypeError, ValueError):
+                desired_id = None
+        desired_label = next(
+            (label for label, account_id in mapping.items() if account_id == desired_id),
+            labels[0],
+        )
+        self.player_selector_var.set(desired_label)
+        if load_saved and desired_label != "尚无本地玩家":
+            self._load_player_selection(mapping[desired_label])
+
+    def _on_player_selected(self, _event=None):
+        if self.process is not None or self.koromo_download_running:
+            messagebox.showinfo(
+                "任务正在运行",
+                "请先等待当前任务结束，再切换玩家。",
+                parent=self.root,
+            )
+            self._refresh_player_selector(select_account_id=self.direct_account_id)
+            return
+        label = self.player_selector_var.get()
+        if label == "尚无本地玩家":
+            return
+        self._load_player_selection(self.player_label_to_id.get(label))
+        self._save_settings()
+
+    def _clear_result_view(self):
+        self.rows = []
+        self.current_result_path = None
+        for variable in (
+            self.card_count_var,
+            self.card_rating_var,
+            self.card_ai_var,
+            self.card_pt_var,
+            self.card_session_var,
+        ):
+            variable.set("—")
+        for item in self.table.get_children():
+            self.table.delete(item)
+        self._draw_empty_chart()
+
+    def _load_player_selection(self, account_id: int | None):
+        self.direct_urls = []
+        self.direct_records = []
+        self.direct_account_id = account_id
+        self.direct_skipped_non_hanchan = 0
+        if account_id is None:
+            self.direct_source_name = "未分组 / 旧数据"
+            self.direct_count_var.set("未分组旧结果仅供查看；导入带 ID 的牌谱后可归档")
+        else:
+            imported = load_player_import(PLAYER_LIBRARY_ROOT, account_id)
+            if imported is not None:
+                self._apply_paipu_import(
+                    imported,
+                    f"本地玩家库 · ID {account_id}",
+                    persist=False,
+                    refresh_selector=False,
+                )
+            else:
+                self.direct_source_name = f"玩家 ID {account_id}"
+                self.direct_count_var.set("此玩家目前只有分析结果，没有本地牌谱库")
+
+        result_path = self._active_result_path()
+        if result_path.is_file():
+            self.load_result_file(result_path)
+            self.tabs.select(0)
+            self.status_var.set(
+                f"正在查看玩家 ID {account_id}"
+                if account_id is not None
+                else "正在查看未分组旧数据"
+            )
+        else:
+            self._clear_result_view()
+            if account_id is not None and self.direct_urls:
+                self._refresh_direct_preflight()
+
+    def _store_player_import(self, imported: PaipuImport) -> tuple[PaipuImport, Path]:
+        if imported.account_id is None:
+            raise ValueError("导入数据没有玩家 ID")
+        existing = load_player_import(PLAYER_LIBRARY_ROOT, imported.account_id)
+        merged = merge_player_imports(existing, imported)
+        path = save_player_import(PLAYER_LIBRARY_ROOT, merged)
+        return merged, path
+
+    def _adopt_legacy_results_for_player(self, imported: PaipuImport) -> int:
+        if imported.account_id is None or not DIRECT_RESULTS_PATH.is_file():
+            return 0
+        target = player_result_path(RESULTS_ROOT, imported.account_id)
+        try:
+            imported_ids = set(
+                _imported_metadata_by_uuid(imported.records, imported.account_id)
+            )
+            existing_ids = {
+                str(row.get("uuid") or "").strip()
+                for row in read_result_rows(str(target), "xlsx")
+            }
+            rows = [
+                row
+                for row in read_result_rows(str(DIRECT_RESULTS_PATH), "xlsx")
+                if str(row.get("uuid") or "").strip() in imported_ids
+                and str(row.get("uuid") or "").strip() not in existing_ids
+            ]
+            if not rows:
+                return 0
+            with ResultWriter(str(target), output_format="xlsx", flush_every=20) as writer:
+                for row in rows:
+                    writer.write_row(
+                        {
+                            **row,
+                            "nickname": f"玩家_{imported.account_id}",
+                            "accountId": imported.account_id,
+                        }
+                    )
+            self._log(
+                f"[玩家库] 已从未分组旧结果复制 {len(rows)} 局到玩家 ID "
+                f"{imported.account_id}；旧文件仍保留。"
+            )
+            return len(rows)
+        except Exception as exc:
+            self._log(f"[玩家库] 复用未分组旧结果失败，将保持原文件不变：{exc}")
+            return 0
+
     def _backfill_imported_result_metadata(self) -> int:
-        if not self.direct_records or not DIRECT_RESULTS_PATH.is_file():
+        result_path = self._active_result_path()
+        if not self.direct_records or not result_path.is_file():
             return 0
         try:
             changed_rows = backfill_result_metadata(
-                str(DIRECT_RESULTS_PATH),
+                str(result_path),
                 "xlsx",
                 _imported_metadata_by_uuid(
                     self.direct_records,
@@ -739,7 +943,7 @@ class MortalDesktopApp:
                 ),
             )
             if changed_rows:
-                self.load_result_file(DIRECT_RESULTS_PATH)
+                self.load_result_file(result_path)
                 self._log(
                     f"[桌面版] 已按牌谱 UUID 为 {changed_rows} 条已有结果补全类型/PT 等元数据。"
                 )
@@ -774,7 +978,21 @@ class MortalDesktopApp:
             messagebox.showerror("无法导入牌谱", str(exc), parent=self.root)
             return
 
-        self._apply_paipu_import(imported, Path(filename).name)
+        if imported.account_id is None:
+            entered_id = simpledialog.askstring(
+                "归入玩家",
+                "这个文件没有可识别的玩家 ID。\n\n"
+                "请输入要归入的雀魂玩家 ID；点击取消则作为未分组临时数据使用。",
+                parent=self.root,
+            )
+            if entered_id:
+                try:
+                    imported = assign_player_id(imported, entered_id)
+                except ValueError as exc:
+                    messagebox.showerror("玩家 ID 无效", str(exc), parent=self.root)
+                    return
+
+        self._apply_paipu_import(imported, Path(filename).name, persist=True)
         if imported.contains_login_frames:
             messagebox.showwarning(
                 "旧抓包含登录帧",
@@ -783,7 +1001,18 @@ class MortalDesktopApp:
                 parent=self.root,
             )
 
-    def _apply_paipu_import(self, imported: PaipuImport, source_name: str):
+    def _apply_paipu_import(
+        self,
+        imported: PaipuImport,
+        source_name: str,
+        *,
+        persist: bool = False,
+        refresh_selector: bool = True,
+    ):
+        library_path = None
+        if persist and imported.account_id is not None:
+            imported, library_path = self._store_player_import(imported)
+            self._adopt_legacy_results_for_player(imported)
         self.direct_urls = imported.urls
         self.direct_records = imported.records
         self.direct_account_id = imported.account_id
@@ -801,7 +1030,20 @@ class MortalDesktopApp:
         elif not imported_types:
             self.analysis_mode_var.set("全部可分析")
         self._backfill_imported_result_metadata()
+        result_path = self._active_result_path()
+        if result_path.is_file():
+            self.load_result_file(result_path)
+        elif self.current_result_path != result_path:
+            self._clear_result_view()
         self._refresh_direct_preflight()
+        if refresh_selector:
+            self._refresh_player_selector(select_account_id=imported.account_id)
+        if library_path is not None:
+            self._log(
+                f"[玩家库] 玩家 ID {imported.account_id} 已保存，共 "
+                f"{len(imported.urls)} 局：{library_path}"
+            )
+        self._save_settings()
 
     def open_koromo_import_dialog(self):
         if self.process is not None or self.koromo_download_running:
@@ -916,6 +1158,7 @@ class MortalDesktopApp:
     ):
         self.koromo_download_running = True
         self.koromo_cancel_event = threading.Event()
+        self.player_selector.configure(state=tk.DISABLED)
         self.koromo_import_button.configure(state=tk.DISABLED)
         self.import_file_button.configure(state=tk.DISABLED)
         self.start_button.configure(state=tk.DISABLED)
@@ -976,6 +1219,7 @@ class MortalDesktopApp:
     def _finish_koromo_import_ui(self):
         self.koromo_download_running = False
         self.koromo_cancel_event = None
+        self.player_selector.configure(state="readonly")
         self.progress.stop()
         self.koromo_import_button.configure(state=tk.NORMAL)
         self.import_file_button.configure(state=tk.NORMAL)
@@ -1082,7 +1326,7 @@ class MortalDesktopApp:
         result_path = (
             self.current_result_path
             if self.current_result_path is not None and self.current_result_path.is_file()
-            else DIRECT_RESULTS_PATH
+            else self._active_result_path()
         )
         if not result_path.is_file():
             messagebox.showwarning(
@@ -1155,9 +1399,10 @@ class MortalDesktopApp:
 
     def _direct_preflight(self) -> tuple[list[str], list[str]]:
         processed = set()
-        if DIRECT_RESULTS_PATH.is_file():
+        result_path = self._active_result_path()
+        if result_path.is_file():
             try:
-                processed = get_processed_uuids(str(DIRECT_RESULTS_PATH), "xlsx")
+                processed = get_processed_uuids(str(result_path), "xlsx")
             except Exception as exc:
                 self._log(f"[桌面版] 无法读取断点记录，将由分析核心再次校验：{exc}")
         selected_urls, _ = self._filtered_direct_input()
@@ -1336,6 +1581,7 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.refresh_pt_button.configure(state=tk.DISABLED)
+        self.player_selector.configure(state=tk.DISABLED)
 
         env = os.environ.copy()
         env["BATCHMORTAL_RESULTS_ROOT"] = str(RESULTS_ROOT)
@@ -1431,7 +1677,7 @@ class MortalDesktopApp:
                 elif kind == "koromo_done":
                     imported, path = payload
                     self._finish_koromo_import_ui()
-                    self._apply_paipu_import(imported, path.name)
+                    self._apply_paipu_import(imported, path.name, persist=True)
                     self._save_settings()
                     self._log(f"[牌谱屋] 安全牌谱文件已保存：{path}")
                     messagebox.showinfo(
@@ -1482,10 +1728,10 @@ class MortalDesktopApp:
                 pass
 
     def _reload_latest_result(self):
-        latest = self._latest_result_file()
-        if latest is not None:
+        active = self._active_result_path()
+        if active.is_file():
             try:
-                self.load_result_file(latest)
+                self.load_result_file(active)
                 self.tabs.select(0)
             except Exception as exc:
                 self._log(f"[桌面版] 读取结果失败：{exc}")
@@ -1495,6 +1741,7 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.refresh_pt_button.configure(state=tk.NORMAL)
+        self.player_selector.configure(state="readonly")
         self._reload_latest_result()
         if self.direct_urls:
             self._refresh_direct_preflight(update_status=False)
@@ -1511,18 +1758,12 @@ class MortalDesktopApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.refresh_pt_button.configure(state=tk.NORMAL)
+        self.player_selector.configure(state="readonly")
         self._reload_latest_result()
         if self.direct_urls:
             self._refresh_direct_preflight(update_status=False)
         self.status_var.set("已停止；完成结果已保存")
         self._log(f"[桌面版] 分析已停止（退出码 {exit_code}）；完成结果已保存，未完成对局下次会继续。")
-
-    @staticmethod
-    def _latest_result_file() -> Path | None:
-        candidates = list(RESULTS_ROOT.rglob("results.xlsx")) + list(
-            RESULTS_ROOT.rglob("results.csv")
-        )
-        return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
     def import_results(self):
         path = filedialog.askopenfilename(
@@ -1537,6 +1778,102 @@ class MortalDesktopApp:
             self.status_var.set(f"已导入：{Path(path).name}")
         except Exception as exc:
             messagebox.showerror("导入失败", str(exc))
+
+    def import_results_to_player(self):
+        path_text = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择要归档的分析结果",
+            filetypes=[
+                ("分析结果", "*.xlsx *.csv"),
+                ("Excel", "*.xlsx"),
+                ("CSV", "*.csv"),
+            ],
+        )
+        if not path_text:
+            return
+        source_path = Path(path_text)
+        output_format = source_path.suffix.lower().lstrip(".")
+        try:
+            rows = read_result_rows(str(source_path), output_format)
+        except Exception as exc:
+            messagebox.showerror("无法读取结果", str(exc), parent=self.root)
+            return
+        if not rows:
+            messagebox.showwarning("没有结果", "文件中没有可归档的数据。", parent=self.root)
+            return
+
+        inferred_ids = {
+            str(row.get("accountId") or "").strip()
+            for row in rows
+            if str(row.get("accountId") or "").strip().isdigit()
+        }
+        default_id = (
+            next(iter(inferred_ids))
+            if len(inferred_ids) == 1
+            else (str(self.direct_account_id) if self.direct_account_id else "")
+        )
+        entered_id = simpledialog.askstring(
+            "归入玩家",
+            f"将 {len(rows)} 条分析结果归入哪个雀魂玩家 ID？",
+            initialvalue=default_id,
+            parent=self.root,
+        )
+        if not entered_id:
+            return
+        try:
+            account_id = int(entered_id.strip())
+            if account_id <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("玩家 ID 无效", "玩家 ID 必须是正整数。", parent=self.root)
+            return
+
+        target_path = player_result_path(RESULTS_ROOT, account_id)
+        try:
+            if source_path.resolve() != target_path.resolve():
+                existing_ids = {
+                    str(row.get("uuid") or "").strip()
+                    for row in read_result_rows(str(target_path), "xlsx")
+                    if str(row.get("uuid") or "").strip()
+                }
+                new_rows = [
+                    row
+                    for row in rows
+                    if not str(row.get("uuid") or "").strip()
+                    or str(row.get("uuid") or "").strip() not in existing_ids
+                ]
+                if new_rows:
+                    with ResultWriter(
+                        str(target_path),
+                        output_format="xlsx",
+                        flush_every=20,
+                    ) as writer:
+                        for row in new_rows:
+                            writer.write_row(
+                                {
+                                    **row,
+                                    "nickname": f"玩家_{account_id}",
+                                    "accountId": account_id,
+                                }
+                            )
+            else:
+                new_rows = []
+            self.direct_account_id = account_id
+            self._refresh_player_selector(select_account_id=account_id)
+            self._load_player_selection(account_id)
+            self._save_settings()
+        except Exception as exc:
+            messagebox.showerror("归档失败", str(exc), parent=self.root)
+            return
+
+        added = len(new_rows)
+        self.status_var.set(f"玩家 ID {account_id}：已归档 {added} 条新结果")
+        messagebox.showinfo(
+            "归档完成",
+            f"玩家 ID {account_id} 已新增 {added} 条结果。\n\n"
+            "源文件没有移动或删除；以后可从左侧“当前玩家”切换查看。",
+            parent=self.root,
+        )
 
     def load_result_file(self, path: Path):
         suffix = path.suffix.lower()

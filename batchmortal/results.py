@@ -7,6 +7,7 @@ import openpyxl
 
 CSV_COLUMNS = [
     "nickname",
+    "accountId",
     "source",
     "mode",
     "recordType",
@@ -111,6 +112,7 @@ def backfill_result_metadata(
         return 0
 
     allowed_columns = {
+        "accountId",
         "mode",
         "recordType",
         "paipuUrl",

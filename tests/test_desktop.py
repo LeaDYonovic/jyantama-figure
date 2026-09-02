@@ -1,6 +1,9 @@
 from matplotlib.figure import Figure
 from pathlib import Path
 
+import desktop
+from batchmortal.paipu_import import PaipuImport
+from batchmortal.results import ResultWriter, read_result_rows
 from desktop import (
     MortalDesktopApp,
     _aggregate_percentage,
@@ -143,10 +146,53 @@ def test_imported_metadata_map_keeps_zero_pt_and_matches_viewpoint_uuid():
     )
 
     row = metadata["260901-pt-refresh-test_a2684071"]
+    assert row["accountId"] == 12345678
     assert row["ptDelta"] == 0
     assert row["placement"] == 3
     assert row["finalScore"] == 25700
     assert row["playerLevelScore"] == 590
+
+
+def test_legacy_results_are_copied_only_to_matching_player(monkeypatch, tmp_path):
+    results_root = tmp_path / "results"
+    legacy = results_root / "majsoul" / "直接牌谱" / "results.xlsx"
+    with ResultWriter(str(legacy), output_format="xlsx") as writer:
+        writer.write_row(
+            {
+                "nickname": "直接牌谱",
+                "uuid": "260901-matching-log_a2684071",
+                "rating": 82.5,
+            }
+        )
+        writer.write_row(
+            {
+                "nickname": "直接牌谱",
+                "uuid": "260901-other-log_a999",
+                "rating": 88.0,
+            }
+        )
+    monkeypatch.setattr(desktop, "RESULTS_ROOT", results_root)
+    monkeypatch.setattr(desktop, "DIRECT_RESULTS_PATH", legacy)
+    app = object.__new__(MortalDesktopApp)
+    app._log = lambda _message: None
+    imported = PaipuImport(
+        urls=["https://game.maj-soul.com/1/?paipu=260901-matching-log_a2684071"],
+        records=[
+            {
+                "uuid": "260901-matching-log",
+                "paipu_url": "https://game.maj-soul.com/1/?paipu=260901-matching-log_a2684071",
+            }
+        ],
+        account_id=12345678,
+    )
+
+    copied = app._adopt_legacy_results_for_player(imported)
+
+    target = results_root / "majsoul" / "玩家_12345678" / "results.xlsx"
+    rows = read_result_rows(str(target), "xlsx")
+    assert copied == 1
+    assert [row["uuid"] for row in rows] == ["260901-matching-log_a2684071"]
+    assert rows[0]["accountId"] == 12345678
 
 
 def test_redraw_builds_three_panel_chart_and_excludes_errors():
