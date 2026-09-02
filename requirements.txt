@@ -5,3 +5,4 @@ pyyaml>=6.0.1
 tomli>=2.0.1; python_version < "3.11"
 pandas>=2.0.0
 pyecharts>=2.0.0
+matplotlib>=3.9.0

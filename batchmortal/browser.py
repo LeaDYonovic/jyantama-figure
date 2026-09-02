@@ -7,6 +7,8 @@ from collections import deque
 
 from seleniumbase import SB
 
+from batchmortal.control import check_stop_requested
+
 REVIEW_BASE_URL = "https://mjai.ekyu.moe"
 DEFAULT_REVIEW_LANGUAGE = "zh-CN"
 DEFAULT_REVIEW_UI = "classic"
@@ -45,6 +47,38 @@ RESULT_SELECTOR = "details > dl"
 REPORT_URL_FRAGMENT = "/report/"
 BAD_MOVE_STRICT_LIMIT = 5
 BAD_MOVE_LOOSE_LIMIT = 10
+
+
+class ReviewInputError(RuntimeError):
+    """The review service rejected a game log as permanently invalid."""
+
+
+def _review_input_error_reason(page_text):
+    normalized = str(page_text or "").lower()
+    direct_markers = (
+        "invalid game log",
+        "not a hanchan game",
+        "游戏长度不是半庄",
+        "ゲームは半荘（東南）ではない",
+        "ゲームは半荘(東南)ではない",
+    )
+    for marker in direct_markers:
+        if marker in normalized:
+            return marker
+    if (
+        "an error occurred during the task" in normalized
+        and "please check your inputs" in normalized
+    ):
+        return "review task rejected the input"
+    return ""
+
+
+def _raise_for_review_input_error(page_text, log_prefix):
+    reason = _review_input_error_reason(page_text)
+    if reason:
+        raise ReviewInputError(
+            f"{log_prefix} Mortal rejected the game log as invalid or incompatible: {reason}"
+        )
 
 REVIEW_UI_ALIASES = {
     "classic": "classic",
@@ -216,6 +250,7 @@ class ReviewSubmissionCoordinator:
     def wait_for_submit_slot(self, uuid):
         with self.condition:
             while True:
+                check_stop_requested()
                 now = time.monotonic()
                 if self.active_uuid is None and now >= self.next_submit_time and now >= self.cooldown_until:
                     self.active_uuid = uuid
@@ -333,8 +368,15 @@ class BrowserAutomator:
 
                         result = None
                         fatal_error = False
+                        invalid_error = None
                         try:
                             result = self.analyze_single(sb, task)
+                        except ReviewInputError as exc:
+                            invalid_error = exc
+                            logging.error(
+                                f"{task.get('log_prefix', '[' + task['uuid'] + ']')} "
+                                f"INVALID review input: {exc}"
+                            )
                         except Exception as exc:
                             err_str = str(exc).lower()
                             logging.error(f"{task.get('log_prefix', '[' + task['uuid'] + ']')} ERROR exception: {exc}")
@@ -353,6 +395,14 @@ class BrowserAutomator:
 
                         if result:
                             result_queue.put({"status": "success", "task": task, "result": result})
+                        elif invalid_error is not None:
+                            result_queue.put(
+                                {
+                                    "status": "invalid",
+                                    "task": task,
+                                    "error": str(invalid_error),
+                                }
+                            )
                         else:
                             task["retries"] = task.get("retries", 0) + 1
                             if task["retries"] <= max_retries:
@@ -504,6 +554,7 @@ class BrowserAutomator:
                     active_slot, standby_slot = standby_slot, active_slot
 
     def analyze_single(self, sb, task):
+        check_stop_requested()
         uuid = task["uuid"]
         log_prefix = task.get("log_prefix", f"[{uuid}]")
         started_at = time.perf_counter()
@@ -634,6 +685,13 @@ class BrowserAutomator:
         except Exception:
             pass
 
+        if isinstance(exc, ReviewInputError):
+            logging.error(
+                f"{task.get('log_prefix', '[' + task['uuid'] + ']')} "
+                "SKIP Review service rejected this game log; it will not be retried."
+            )
+            return {"status": "invalid", "task": task, "error": str(exc)}
+
         if any(marker in err_str for marker in ("no such window", "closed", "invalid session", "disconnected")):
             raise exc
 
@@ -760,6 +818,14 @@ class BrowserAutomator:
             sb.save_screenshot(error_screenshot)
         except Exception:
             pass
+
+        if isinstance(exc, ReviewInputError):
+            self._reset_pipeline_slot(slot)
+            logging.error(
+                f"{task.get('log_prefix', '[' + task['uuid'] + ']')} "
+                "SKIP Review service rejected this game log; it will not be retried."
+            )
+            return {"status": "invalid", "task": task, "error": str(exc)}
 
         if any(marker in err_str for marker in ("no such window", "closed", "invalid session", "disconnected")):
             raise exc
@@ -1021,6 +1087,7 @@ class BrowserAutomator:
         recoveries = 0
 
         while time.time() < deadline:
+            check_stop_requested()
             state = self._read_review_state(sb)
             if state["token_length"] > 0:
                 return
@@ -1082,6 +1149,7 @@ class BrowserAutomator:
     def _wait_for_submission_departure_or_error(self, sb, log_prefix, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
+            check_stop_requested()
             state = self._read_review_state(sb)
             current_url = state["url"]
             page_text = state["page_text"]
@@ -1094,6 +1162,8 @@ class BrowserAutomator:
 
             if "too many requests" in page_text or "rate limit" in page_text:
                 raise RuntimeError(f"{log_prefix} Review site rate limited this request")
+
+            _raise_for_review_input_error(page_text, log_prefix)
 
             time.sleep(0.5)
 
@@ -1328,6 +1398,7 @@ class BrowserAutomator:
     def _wait_for_result_or_error(self, sb, log_prefix, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
+            check_stop_requested()
             if self.review_ui == "killerducky":
                 try:
                     killerducky_ready = sb.execute_script(
@@ -1354,6 +1425,8 @@ class BrowserAutomator:
 
             if "too many requests" in page_text or "rate limit" in page_text:
                 raise RuntimeError(f"{log_prefix} Review site rate limited this request")
+
+            _raise_for_review_input_error(page_text, log_prefix)
 
             time.sleep(0.5)
 

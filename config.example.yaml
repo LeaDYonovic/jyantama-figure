@@ -8,6 +8,9 @@
 #   th（或 1） -> 天凤 / nodocchi.moe
 mode: "th"
 
+# 雀魂牌谱屋当前要求授权访问令牌。请通过环境变量传入，不要把令牌提交到配置仓库：
+#   PowerShell: $env:AMAE_KOROMO_TOKEN = "你的令牌"
+
 # 雀魂配置；仅在 mode: "mj" 时读取
 mj:
   nickname: ""

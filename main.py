@@ -6,14 +6,35 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-from batchmortal.api import build_paipu_urls, get_player_records, search_player, get_player_nickname_by_id
+from batchmortal.api import (
+    acc2match,
+    build_paipu_urls,
+    configure_access_token,
+    get_player_records,
+    search_player,
+    get_player_nickname_by_id,
+    format_timestamp,
+)
 from batchmortal.browser import (
     BrowserAutomator,
+    ReviewInputError,
     ReviewSubmissionCoordinator,
     normalize_review_language,
     normalize_review_ui,
 )
-from batchmortal.results import ResultWriter, parse_metadata, get_processed_uuids, read_result_rows
+from batchmortal.results import (
+    ResultWriter,
+    backfill_result_metadata,
+    parse_metadata,
+    get_processed_uuids,
+    read_result_rows,
+)
+from batchmortal.control import AnalysisStopped, check_stop_requested, stop_requested
+from batchmortal.paipu_import import (
+    PaipuImport,
+    normalize_majsoul_paipu_input,
+    read_paipu_import,
+)
 from batchmortal.tenhou import (
     build_tenhou_paipu_urls,
     fetch_tenhou_player_records,
@@ -110,6 +131,16 @@ def parse_args():
     )
     target_group.add_argument(
         "-a", "--account-id", "--account_id", dest="account_id", type=int, default=config.get("account_id"), help="Directly specify player account ID"
+    )
+    target_group.add_argument(
+        "--paipu-url",
+        action="append",
+        default=[],
+        help="Direct Mahjong Soul paipu URL or paipu token; may be repeated",
+    )
+    target_group.add_argument(
+        "--paipu-file",
+        help="UTF-8 text file containing one Mahjong Soul paipu URL per line",
     )
 
     # -- Analysis Options --
@@ -256,17 +287,70 @@ def parse_args():
         fallback = "all" if args.source == "tenhou" else "9"
         args.modes = str(config.get("modes", fallback))
 
+    try:
+        direct_source = load_direct_paipu_source(args.paipu_url, args.paipu_file)
+        args.direct_paipu_urls = direct_source.urls
+        args.direct_paipu_records = direct_source.records
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+
     if args.source == "tenhou":
+        if args.direct_paipu_urls:
+            parser.error("--paipu-url/--paipu-file only supports Mahjong Soul")
         if not args.player:
             parser.error("Tenhou source requires -p/--player (a Tenhou player name)")
         if args.account_id:
             parser.error("--account-id is only supported by the majsoul source")
-    elif not args.player and not args.account_id:
-        parser.error("Mahjong Soul source requires -p/--player or -a/--account-id")
+    elif not args.direct_paipu_urls and not args.player and not args.account_id:
+        parser.error(
+            "Mahjong Soul source requires -p/--player, -a/--account-id, "
+            "or --paipu-url/--paipu-file"
+        )
         
-    args.target_name = args.player if args.player else str(args.account_id)
+    args.target_name = (
+        args.player
+        if args.player
+        else ("直接牌谱" if args.direct_paipu_urls else str(args.account_id))
+    )
         
     return args
+
+
+def load_direct_paipu_source(
+    urls: list[str] | None, filepath: str | None
+) -> PaipuImport:
+    """Read direct inputs and retain safe per-game metadata when available."""
+    records = [
+        {"uuid": "", "paipu_url": str(value).strip()}
+        for value in (urls or [])
+        if str(value).strip()
+    ]
+    account_id = None
+    if filepath:
+        imported = read_paipu_import(filepath)
+        records.extend(imported.records)
+        account_id = imported.account_id
+
+    deduplicated = []
+    seen = set()
+    for record in records:
+        url = str(record.get("paipu_url") or record.get("paipuUrl") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduplicated.append({**record, "paipu_url": url})
+    return PaipuImport(
+        urls=[record["paipu_url"] for record in deduplicated],
+        records=deduplicated,
+        account_id=account_id,
+        source_format="direct",
+        available_records=len(deduplicated),
+    )
+
+
+def load_direct_paipu_inputs(urls: list[str] | None, filepath: str | None) -> list[str]:
+    """Compatibility wrapper returning only direct paipu links."""
+    return load_direct_paipu_source(urls, filepath).urls
 
 
 def build_output_path(nickname: str, output_format: str, source: str = "majsoul") -> tuple[str, str]:
@@ -274,11 +358,15 @@ def build_output_path(nickname: str, output_format: str, source: str = "majsoul"
         c if c.isalnum() or c in ("_", "-", "\u4e00", "\u9fa5") else "_"
         for c in nickname
     )
-    results_root = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "results",
-        source,
-    )
+    configured_results_root = os.environ.get("BATCHMORTAL_RESULTS_ROOT", "").strip()
+    if configured_results_root:
+        results_root = os.path.join(os.path.abspath(configured_results_root), source)
+    else:
+        results_root = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "results",
+            source,
+        )
     output_root = os.path.join(results_root, safe_nick)
     out_path = os.path.join(output_root, f"results.{output_format}")
     return output_root, out_path
@@ -329,10 +417,82 @@ def collect_majsoul_tasks(account_id: int, modes: list[int], limit: int, output_
                     "paipu_url": item["paipuUrl"],
                     "start_time": item.get("startTime", ""),
                     "end_time": item.get("endTime", ""),
+                    "placement": item.get("placement", ""),
+                    "final_score": item.get("finalScore", ""),
+                    "pt_delta": item.get("ptDelta", ""),
+                    "player_level": item.get("playerLevel", ""),
                     "mode_dir": mode_dir,
                 }
             )
 
+    return finalize_tasks(tasks)
+
+
+def collect_direct_majsoul_tasks(
+    inputs: list[str],
+    output_root: str,
+    processed_uuids: set,
+    account_id: int | None = None,
+    metadata_records: list[dict] | None = None,
+) -> list[dict]:
+    """Build analysis tasks from user-provided links without querying Paipuya."""
+    tasks = []
+    seen_ids = set()
+    mode_dir = os.path.join(output_root, "mode_direct")
+    metadata_by_id = {}
+    for record in metadata_records or []:
+        raw_url = str(record.get("paipu_url") or record.get("paipuUrl") or "").strip()
+        if not raw_url:
+            continue
+        try:
+            _, record_id = normalize_majsoul_paipu_input(raw_url, account_id=account_id)
+        except ValueError:
+            continue
+        metadata_by_id[record_id] = record
+
+    def imported_time(value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, (int, float)) or str(value).strip().isdigit():
+            return format_timestamp(int(value))
+        return str(value).strip()
+
+    for value in inputs:
+        paipu_url, direct_id = normalize_majsoul_paipu_input(value, account_id=account_id)
+        if direct_id in seen_ids:
+            continue
+        seen_ids.add(direct_id)
+        if direct_id in processed_uuids:
+            log_line(f"[Skip] uuid={direct_id} already processed.")
+            continue
+        metadata = metadata_by_id.get(direct_id, {})
+        mode_id = metadata.get("mode_id", metadata.get("modeId", ""))
+        record_type = metadata.get("record_type", metadata.get("recordType", "unknown"))
+        tasks.append(
+            {
+                "source": "majsoul",
+                "mode": mode_id or "direct",
+                "record_type": record_type or "unknown",
+                "uuid": direct_id,
+                "paipu_url": paipu_url,
+                "start_time": imported_time(
+                    metadata.get("start_time", metadata.get("startTime", ""))
+                ),
+                "end_time": imported_time(
+                    metadata.get("end_time", metadata.get("endTime", ""))
+                ),
+                "placement": metadata.get("placement", ""),
+                "final_score": metadata.get("final_score", metadata.get("finalScore", "")),
+                "pt_delta": metadata.get("pt_delta", metadata.get("ptDelta", "")),
+                "player_level": metadata.get(
+                    "player_level", metadata.get("playerLevel", "")
+                ),
+                "player_level_score": metadata.get(
+                    "player_level_score", metadata.get("playerLevelScore", "")
+                ),
+                "mode_dir": mode_dir,
+            }
+        )
     return finalize_tasks(tasks)
 
 
@@ -370,8 +530,11 @@ def print_summary(args, modes):
     target_display = args.target_name + (f" (ID: {args.account_id})" if args.account_id and args.target_name != str(args.account_id) else "")
     log_line(f"  Target:    {target_display}")
     log_line(f"  Mode:      {args.mode} ({args.source})")
-    log_line(f"  Modes:     {modes}")
-    log_line(f"  Limit:     {args.limit} per mode")
+    if args.direct_paipu_urls:
+        log_line(f"  Input:     {len(args.direct_paipu_urls)} direct paipu URL(s)")
+    else:
+        log_line(f"  Modes:     {modes}")
+        log_line(f"  Limit:     {args.limit} per mode")
     log_line(f"  ModelTag:  {args.model_tag}")
     log_line(f"  Language:  {args.review_language}")
     log_line(f"  ReviewUI:  {args.review_ui}")
@@ -434,7 +597,7 @@ def log_final_averages(args, stats: dict):
 
 
 def add_result_row_to_stats(stats: dict, row: dict, include_bad_move: bool):
-    if str(row.get("rating", "")).strip() == "ERROR":
+    if parse_float(row.get("rating", "")) is None:
         return
 
     add_average_sample(stats, "rating", row.get("rating", ""))
@@ -468,10 +631,16 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: 
         "nickname": args.target_name,
         "source": task.get("source", args.source),
         "mode": task["mode"],
+        "recordType": task.get("record_type", "unknown"),
         "uuid": task["uuid"],
         "paipuUrl": task["paipu_url"],
         "startTime": task.get("start_time", ""),
         "endTime": task.get("end_time", ""),
+        "placement": task.get("placement", ""),
+        "finalScore": task.get("final_score", ""),
+        "ptDelta": task.get("pt_delta", ""),
+        "playerLevel": task.get("player_level", ""),
+        "playerLevelScore": task.get("player_level_score", ""),
         "timestamp": timestamp,
     }
 
@@ -531,14 +700,16 @@ def consume_result_event(args, writer: ResultWriter, result_event: dict, stats: 
         log_line(message)
         return 1, 0
 
+    invalid = result_event["status"] == "invalid"
     writer.write_row(
         {
             **base_row,
             "modelTag": args.model_tag,
-            "rating": "ERROR",
+            "rating": "INVALID" if invalid else "ERROR",
+            "errorMessage": result_event.get("error", ""),
         }
     )
-    log_line(f"{task['log_prefix']} ERROR")
+    log_line(f"{task['log_prefix']} {'INVALID (will be skipped next time)' if invalid else 'ERROR'}")
     return 0, 1
 
 
@@ -559,15 +730,34 @@ def run_parallel_analysis(
         task["save_local_paipu"] = args.save_local_paipu
         task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
     log_line("[Serial] Starting analysis with 1 persistent browser")
+    stopped = False
 
     try:
         with SB(uc=True, headless=automator.headless, proxy=automator.proxy) as sb:
             for task in tasks:
+                if stop_requested():
+                    stopped = True
+                    break
                 result_event = None
                 for attempt in range(args.retry + 1):
                     try:
+                        check_stop_requested()
                         result = automator.analyze_single(sb, task)
                         result_event = {"status": "success", "task": task, "result": result}
+                        break
+                    except ReviewInputError as exc:
+                        prefix = task["log_prefix"]
+                        logging.error(
+                            f"{prefix} INVALID review input; this game will not be retried: {exc}"
+                        )
+                        result_event = {
+                            "status": "invalid",
+                            "task": task,
+                            "error": str(exc),
+                        }
+                        break
+                    except AnalysisStopped:
+                        stopped = True
                         break
                     except Exception as exc:
                         prefix = task["log_prefix"]
@@ -581,14 +771,23 @@ def run_parallel_analysis(
                         logging.error(
                             f"{prefix} SKIP permanently failed after {args.retry} retries."
                         )
-                        result_event = {"status": "fail", "task": task}
+                        result_event = {
+                            "status": "fail",
+                            "task": task,
+                            "error": str(exc),
+                        }
                         break
 
+                if stopped:
+                    break
                 succeeded, failed = consume_result_event(args, writer, result_event, stats)
                 total_processed += succeeded
                 total_failed += failed
     finally:
         writer.close()
+
+    if stopped:
+        log_line("[Stop] Stop request received; saved completed results and closed the browser.")
 
     return total_processed, total_failed
 
@@ -611,14 +810,23 @@ def run_controlled_pipeline_analysis(
         task["analyze_bad_move_rate"] = args.analyze_bad_move_rate
 
     log_line("[Alternate] Starting two-window alternating review flow")
+    stopped = False
 
     try:
         for result_event in automator.iter_alternating_windows(tasks, max_retries=args.retry):
             succeeded, failed = consume_result_event(args, writer, result_event, stats)
             total_processed += succeeded
             total_failed += failed
+            if stop_requested():
+                stopped = True
+                break
+    except AnalysisStopped:
+        stopped = True
     finally:
         writer.close()
+
+    if stopped:
+        log_line("[Stop] Stop request received; saved completed results and closed the browser.")
 
     return total_processed, total_failed
 
@@ -643,6 +851,7 @@ def main():
     configure_logging()
     start_time = time.time()
     args = parse_args()
+    koromo_token_configured = configure_access_token()
     args.retry = max(0, args.retry)
     try:
         if args.source == "tenhou":
@@ -661,7 +870,9 @@ def main():
     account_id = None
     tenhou_records = None
     try:
-        if args.source == "tenhou":
+        if args.direct_paipu_urls:
+            pass
+        elif args.source == "tenhou":
             args.target_name, tenhou_records = fetch_tenhou_player_records(args.player)
         elif args.account_id:
             account_id = args.account_id
@@ -678,9 +889,43 @@ def main():
         sys.exit(1)
 
     print_summary(args, modes)
+    if args.direct_paipu_urls:
+        log_line("  KoromoAuth: not required for direct paipu input")
+    else:
+        log_line(
+            "  KoromoAuth: "
+            + ("configured" if koromo_token_configured else "not configured")
+        )
 
     output_root, out_path = build_output_path(args.target_name, args.output, args.source)
     processed_uuids = get_processed_uuids(out_path, args.output)
+    if args.direct_paipu_urls:
+        imported_tasks = collect_direct_majsoul_tasks(
+            args.direct_paipu_urls,
+            output_root,
+            set(),
+            account_id=args.account_id,
+            metadata_records=args.direct_paipu_records,
+        )
+        metadata_by_uuid = {
+            task["uuid"]: {
+                "mode": task.get("mode", ""),
+                "recordType": task.get("record_type", "unknown"),
+                "paipuUrl": task.get("paipu_url", ""),
+                "startTime": task.get("start_time", ""),
+                "endTime": task.get("end_time", ""),
+                "placement": task.get("placement", ""),
+                "finalScore": task.get("final_score", ""),
+                "ptDelta": task.get("pt_delta", ""),
+                "playerLevel": task.get("player_level", ""),
+                "playerLevelScore": task.get("player_level_score", ""),
+            }
+            for task in imported_tasks
+        }
+        backfilled = backfill_result_metadata(out_path, args.output, metadata_by_uuid)
+        if backfilled:
+            log_line(f"[Import] Backfilled PT and game metadata for {backfilled} existing result(s).")
+            processed_uuids = get_processed_uuids(out_path, args.output)
     proxy = detect_proxy(args.proxy)
 
     if proxy:
@@ -688,7 +933,15 @@ def main():
     else:
         logging.info("[Proxy] No system proxy detected, running directly.")
 
-    if args.source == "tenhou":
+    if args.direct_paipu_urls:
+        tasks = collect_direct_majsoul_tasks(
+            args.direct_paipu_urls,
+            output_root,
+            processed_uuids,
+            account_id=args.account_id,
+            metadata_records=args.direct_paipu_records,
+        )
+    elif args.source == "tenhou":
         tasks = collect_tenhou_tasks(
             tenhou_records,
             args.target_name,

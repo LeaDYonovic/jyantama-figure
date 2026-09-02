@@ -1,6 +1,75 @@
-# Batch Mortal Analysis
+# 雀魂 Mortal 牌谱分析器
 
-`batchmortal` 是一个批量牌谱分析脚本：从 `amae-koromo` 获取雀魂对局，或从 `nodocchi.moe` 获取天凤四人半庄对局，再通过 SeleniumBase 将牌谱提交到 `mjai.ekyu.moe`，最后导出 CSV/XLSX 结果与可选图表。
+面向 Windows 的雀魂四人半庄赛后复盘工具，配套 Tampermonkey 脚本导出本人牌谱，并通过 Mortal 生成 Rating、一致率、恶手率和 PT 趋势图。
+
+本项目在 [myouo/batchmortal](https://github.com/myouo/batchmortal) 的基础上开发，保留命令行批量分析能力，并新增 Windows 桌面界面、网页安全导出、断点续跑、结果缓存和筛选统计。
+
+## Windows 桌面版
+
+本分支提供中文桌面程序 `desktop.py`，用于四人半庄的赛后分析。桌面版包含：
+
+- 在主界面直接导入网页脚本生成的 JSON/TXT；
+- 手动粘贴雀魂分享链接分析；
+- 从当前已登录的雀魂网页导出自己最近 100 局或全部四人半庄，并可按段位场/友人场、房间、时间筛选；
+- Mortal 4.1a / 4.1b / 4.1c 模型；
+- 三层趋势图：Rating/加权 AI 一致率、5%/10% 恶手率、单场/累计 PT；
+- 自动排除分析失败记录，并显示中间 50% Rating 区间、均值和连续对局时段；
+- 每完成一局立即原子保存，并在再次运行前生成 `results.backup.xlsx` 滚动备份；
+- 导入后预先显示“已完成 / 待分析”，按完整牌谱 UUID 跳过成功局，“本次最多新增分析”只从未完成局中计数；
+- “仅补全 PT”可把当前网页 JSON 中的 PT、顺位、终局点数和段位进度写回已有结果并刷新图表，不调用 Mortal，也不修改 Rating/一致率/恶手率；
+- Mortal 明确拒绝的永久无效牌谱会记为 `INVALID`，下一次自动跳过；临时网络、限流失败仍记为 `ERROR`，以后可以重试；
+- 开始前检测残留的旧版分析核心，避免两个版本同时请求 Mortal 网站；
+- “停止”会先请求分析核心保存并关闭浏览器；若网页卡住超过 15 秒，再清理整个分析进程树；
+- CSV/XLSX 导入、牌谱明细、结果链接和 PNG 导出；
+- 分析前可选择“仅段位场 / 仅友人场 / 全部可分析”，结果图和明细还可独立按类型或段位房间筛选；
+- 后台任务日志、停止与断点续跑。
+
+Windows 用户可双击：
+
+```text
+run_desktop.cmd
+```
+
+首次启动会创建 `.venv` 并安装依赖，之后直接打开桌面窗口。也可以手动运行：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\pythonw.exe desktop.py
+```
+
+### 从已登录的雀魂网页导出自己的牌谱
+
+项目附带 Tampermonkey 用户脚本 `majsoul_recent_100_export.user.js`。0.7.0 版支持 2026 年网页使用的 `fetchGameRecordListV2` / `fetchNextGameRecordList` 协议和 `game.mahjongsoul.com` 域名。它只使用当前雀魂网页已经建立的登录会话读取本人牌谱列表，可选择“最近 100 局”或“全部四人半庄”，并可选择“仅段位场 / 仅友人场 / 段位场 + 友人场”。段位场还能按铜/银/金/玉/王座之间筛选，两类对局都可按最近 30/90/180/365 天筛选。脚本自动跳过东风、三麻、赛事场、活动场及其他 Mortal 不支持的模式。导出的安全 JSON 会保留对局类型、开局/结束时间、顺位、终局点数、单局 PT 和四麻段位进度，但不会保存 OAuth、Cookie、access token、昵称或原始登录帧。
+
+1. 在 Chrome 安装 Tampermonkey，新建脚本并粘贴 `majsoul_recent_100_export.user.js` 的全部内容后保存。
+2. 打开雀魂网页版并刷新一次，正常登录；页面右侧会出现“自己的牌谱”面板。
+3. 选择读取范围、对局类型、房间和时间，点击“读取最近 100 局”或“读取全部”，完成后点击“下载给 Windows”。“最近 100 局”会继续翻页直到找到最多 100 局符合筛选的半庄；“全部”会一直翻页到历史末尾。友人场只保留四人东南战，房间筛选只适用于段位场。下载的是只含本人牌谱链接与必要元数据的安全 JSON，不是账号凭据。
+4. 打开 Windows 桌面版，点击左侧最上方的“导入牌谱 JSON / TXT…”，选择刚下载的文件。
+5. 选择“本次分析模式”、本次最多分析的局数和 Mortal 模型，然后点击“开始分析”。分析完成后可在趋势图上方继续按段位场、友人场或具体段位房间查看。
+
+桌面版会完整导入新脚本导出的所有记录，不再把 JSON 截断为 100 局；主界面的“本次最多新增分析”仅控制这一次提交给 Mortal 的数量，未分析部分保留给下次断点续跑。桌面版也能直接导入旧版 `majsoul-reviewer-capture-v1` 抓包 JSON：程序会在内存中解析其中已有的牌谱列表、自动识别本人账号、提取本人 PT 和段位/友人类型等对局元数据，并跳过已知非半庄模式。此类旧抓包可能包含 OAuth/access token；不要分享，导入后建议删除。新的 0.7.0 用户脚本不会生成这类原始抓包。旧版安全导出 JSON 没有保存对局类型，桌面版会标成“未知/旧导入”；重新用 0.7.0 网页脚本导出并导入一次后，可按 UUID 为已有结果补全类型而无需重跑 Mortal。
+
+若面板一直显示“未检测到大厅连接”，先确认用户脚本已启用，再完整刷新雀魂页面。网页协议以后若有变化，脚本会停止并显示解析错误，不会尝试绕过登录或访问别人的牌谱。100 局经 Mortal 串行分析通常耗时较长，可在桌面版把“本次最多分析”设为 10 局先试跑。
+
+命令行也支持直接链接或文本文件：
+
+```powershell
+python main.py --paipu-url "https://game.maj-soul.com/1/?paipu=……" --player "显示名称"
+python main.py --paipu-file .\paipu-links.txt --player "显示名称"
+```
+
+桌面版数据默认保存在：
+
+```text
+%LOCALAPPDATA%\MajsoulMortalDesktop\results
+```
+
+该目录独立于 EXE 和解压目录，升级桌面程序时不会被覆盖。再次导入相同牌谱后，程序会按牌谱 UUID 自动跳过已有正常 Rating 和 `INVALID` 记录；`ERROR` 或空 Rating 会继续重试。不要在升级时删除 `%LOCALAPPDATA%\MajsoulMortalDesktop`，即可跨版本断点续跑。
+
+需要构建可分发的 Windows 程序时，运行 `build_windows.ps1`。输出目录中需要同时保留 `MajsoulMortalDesktop.exe` 与 `batchmortal-cli.exe`。
+
+> 本工具只用于赛后复盘。Rating、一致率和恶手率是筛选信号，不构成作弊结论，也不应被用于实时出牌、自动操作或绕过第三方服务的访问控制。
 
 ## 环境要求
 

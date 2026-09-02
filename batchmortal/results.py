@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+import shutil
 
 import openpyxl
 
@@ -8,14 +9,21 @@ CSV_COLUMNS = [
     "nickname",
     "source",
     "mode",
+    "recordType",
     "uuid",
     "paipuUrl",
     "startTime",
     "endTime",
+    "placement",
+    "finalScore",
+    "ptDelta",
+    "playerLevel",
+    "playerLevelScore",
     "resultUrl",
     "localPaipuPath",
     "modelTag",
     "rating",
+    "errorMessage",
     "aiConsistencyRate",
     "aiConsistencyNumerator",
     "aiConsistencyDenominator",
@@ -31,6 +39,29 @@ CSV_COLUMNS = [
     "badMoveCount10",
     "badMoveDenominator",
 ]
+
+
+def _backup_path(filepath: str) -> str:
+    root, extension = os.path.splitext(filepath)
+    return f"{root}.backup{extension}"
+
+
+def _create_rolling_backup(filepath: str):
+    if os.path.exists(filepath):
+        shutil.copy2(filepath, _backup_path(filepath))
+
+
+def _save_workbook_atomic(workbook, filepath: str):
+    temporary_path = filepath + ".tmp"
+    try:
+        workbook.save(temporary_path)
+        os.replace(temporary_path, filepath)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
 
 
 def parse_metadata(metadata: dict) -> dict:
@@ -70,12 +101,113 @@ def parse_metadata(metadata: dict) -> dict:
     }
 
 
+def backfill_result_metadata(
+    filepath: str,
+    output_format: str,
+    metadata_by_uuid: dict[str, dict],
+) -> int:
+    """Fill blank imported-game fields without replacing completed analysis data."""
+    if not metadata_by_uuid or not os.path.exists(filepath):
+        return 0
+
+    allowed_columns = {
+        "mode",
+        "recordType",
+        "paipuUrl",
+        "startTime",
+        "endTime",
+        "placement",
+        "finalScore",
+        "ptDelta",
+        "playerLevel",
+        "playerLevelScore",
+    }
+    updated_rows = 0
+
+    def should_fill(column: str, current_value, new_value) -> bool:
+        if new_value in (None, ""):
+            return False
+        current = str(current_value or "").strip()
+        if not current:
+            return True
+        if column == "recordType" and current.lower() == "unknown":
+            return str(new_value).strip().lower() != "unknown"
+        if column == "mode" and current.lower() == "direct":
+            return True
+        return False
+
+    if output_format == "csv":
+        with open(filepath, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+        for row in rows:
+            updates = metadata_by_uuid.get(str(row.get("uuid") or "").strip())
+            if not updates:
+                continue
+            changed = False
+            for column in allowed_columns:
+                value = updates.get(column, "")
+                if not should_fill(column, row.get(column), value):
+                    continue
+                row[column] = value
+                changed = True
+            updated_rows += int(changed)
+        if updated_rows:
+            _create_rolling_backup(filepath)
+            with open(filepath, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+        return updated_rows
+
+    if output_format != "xlsx":
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+    workbook = openpyxl.load_workbook(filepath)
+    try:
+        worksheet = workbook.active
+        headers = {
+            str(cell.value): cell.column
+            for cell in worksheet[1]
+            if cell.value is not None and str(cell.value)
+        }
+        for column in CSV_COLUMNS:
+            if column not in headers:
+                column_index = worksheet.max_column + 1
+                worksheet.cell(row=1, column=column_index, value=column)
+                headers[column] = column_index
+
+        uuid_column = headers.get("uuid")
+        if uuid_column is None:
+            return 0
+        for row_index in range(2, worksheet.max_row + 1):
+            uuid = str(worksheet.cell(row=row_index, column=uuid_column).value or "").strip()
+            updates = metadata_by_uuid.get(uuid)
+            if not updates:
+                continue
+            changed = False
+            for column in allowed_columns:
+                value = updates.get(column, "")
+                cell = worksheet.cell(row=row_index, column=headers[column])
+                if not should_fill(column, cell.value, value):
+                    continue
+                cell.value = value
+                changed = True
+            updated_rows += int(changed)
+        if updated_rows:
+            _create_rolling_backup(filepath)
+            _save_workbook_atomic(workbook, filepath)
+    finally:
+        workbook.close()
+    return updated_rows
+
+
 class ResultWriter:
     """
     Keep the output file open and flush in batches to avoid O(n^2) XLSX writes.
     """
 
-    def __init__(self, filepath: str, output_format: str = "csv", flush_every: int = 20):
+    def __init__(self, filepath: str, output_format: str = "csv", flush_every: int = 1):
         self.filepath = filepath
         self.output_format = output_format
         self.flush_every = max(1, flush_every)
@@ -89,6 +221,8 @@ class ResultWriter:
         self._column_to_index = {}
 
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        if not self.is_new:
+            _create_rolling_backup(filepath)
 
         if output_format == "csv":
             if not self.is_new:
@@ -197,8 +331,9 @@ class ResultWriter:
 
         if self.output_format == "csv":
             self._file.flush()
+            os.fsync(self._file.fileno())
         else:
-            self._workbook.save(self.filepath)
+            _save_workbook_atomic(self._workbook, self.filepath)
 
         self._pending_rows = 0
 
@@ -264,7 +399,10 @@ def read_result_rows(filepath: str, output_format: str = "xlsx") -> list[dict]:
 
 def get_processed_uuids(filepath: str, output_format: str = "xlsx") -> set[str]:
     """
-    Reads the existing output file and returns a set of all processed UUIDs.
+    Return UUIDs with a non-empty, non-ERROR Rating as completed analyses.
+
+    This includes INVALID rows: those inputs were permanently rejected by the
+    review service and should not consume time again on later runs.
     """
     processed = set()
     if not os.path.exists(filepath):
@@ -276,24 +414,34 @@ def get_processed_uuids(filepath: str, output_format: str = "xlsx") -> set[str]:
                 reader = csv.DictReader(f)
                 for row in reader:
                     if "uuid" in row and row["uuid"]:
-                        if row.get("rating", "") != "ERROR":
+                        rating = str(row.get("rating") or "").strip()
+                        if rating and rating.upper() != "ERROR":
                             processed.add(row["uuid"])
         elif output_format == "xlsx":
             wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-            ws = wb.active
-            rows = iter(ws.rows)
-            first_row = next(rows, None)
-            if first_row is not None:
-                headers = [cell.value for cell in first_row]
-                if "uuid" in headers:
-                    uuid_idx = headers.index("uuid")
-                    rating_idx = headers.index("rating") if "rating" in headers else -1
-                    for row in rows:
-                        if len(row) > uuid_idx and row[uuid_idx].value:
-                            rating_val = str(row[rating_idx].value).strip() if rating_idx >= 0 and len(row) > rating_idx and row[rating_idx].value is not None else ""
-                            if rating_val != "ERROR":
+            try:
+                ws = wb.active
+                rows = iter(ws.rows)
+                first_row = next(rows, None)
+                if first_row is not None:
+                    headers = [cell.value for cell in first_row]
+                    if "uuid" in headers:
+                        uuid_idx = headers.index("uuid")
+                        rating_idx = headers.index("rating") if "rating" in headers else -1
+                        for row in rows:
+                            if len(row) <= uuid_idx or not row[uuid_idx].value:
+                                continue
+                            rating_val = (
+                                str(row[rating_idx].value).strip()
+                                if rating_idx >= 0
+                                and len(row) > rating_idx
+                                and row[rating_idx].value is not None
+                                else ""
+                            )
+                            if rating_val and rating_val.upper() != "ERROR":
                                 processed.add(str(row[uuid_idx].value).strip())
-            wb.close()
+            finally:
+                wb.close()
     except Exception as e:
         print(f"Failed to read processed UUIDs from {filepath}: {e}")
         

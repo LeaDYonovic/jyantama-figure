@@ -5,3 +5,16 @@ __pycache__/
 downloaded_files/
 latest_logs/
 batchmortal_bench_*/
+.venv/
+.venv-build/
+.pytest_cache/
+.coverage
+htmlcov/
+.tmp-*/
+build*/
+dist*/
+*.spec
+*.exe
+*.zip
+.DS_Store
+Thumbs.db
