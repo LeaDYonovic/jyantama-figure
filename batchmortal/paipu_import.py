@@ -14,6 +14,7 @@ from batchmortal.api import acc2match
 
 SAFE_EXPORT_SCHEMA = "batchmortal-majsoul-links-v1"
 CAPTURE_SCHEMA = "majsoul-reviewer-capture-v1"
+KOROMO_RECORDS_FORMAT = "amae-koromo-player-records"
 SENSITIVE_METHODS = {
     "login",
     "emailLogin",
@@ -307,6 +308,134 @@ def _normalize_record(record: dict, account_id: int | None) -> dict | None:
     }
 
 
+def _koromo_player_metadata(record: dict, account_id: int) -> dict | None:
+    """Extract the requested player's public metadata from an Amae-Koromo record."""
+    players = record.get("players")
+    if not isinstance(players, list):
+        return None
+
+    indexed_players = [
+        (index, player)
+        for index, player in enumerate(players)
+        if isinstance(player, dict)
+    ]
+    target = next(
+        (
+            (index, player)
+            for index, player in indexed_players
+            if str(player.get("accountId", player.get("account_id", "")))
+            == str(account_id)
+        ),
+        None,
+    )
+    if target is None:
+        return None
+
+    def rank_value(item):
+        index, player = item
+        try:
+            score = float(player.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        # Matches Amae-Koromo's stable seat-order tie breaker.
+        return score, -index
+
+    ranked = sorted(indexed_players, key=rank_value, reverse=True)
+    target_index, player = target
+    placement = next(
+        (index + 1 for index, (seat, _) in enumerate(ranked) if seat == target_index),
+        "",
+    )
+    return {
+        "nickname": str(player.get("nickname") or "").strip(),
+        "placement": placement,
+        "final_score": _safe_integer(player.get("score")),
+        "pt_delta": _safe_integer(
+            player.get("gradingScore", player.get("grading_score"))
+        ),
+        "player_level": _safe_integer(player.get("level")),
+        "player_level_score": _safe_integer(
+            player.get("levelScore", player.get("level_score"))
+        ),
+    }
+
+
+def parse_koromo_records(
+    records: list[dict],
+    account_id: int,
+    limit: int | None = None,
+) -> PaipuImport:
+    """Convert public player_records API responses captured by the website."""
+    try:
+        normalized_account_id = int(account_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("牌谱屋玩家 ID 必须是数字") from exc
+    if normalized_account_id <= 0:
+        raise ValueError("牌谱屋玩家 ID 必须是正整数")
+
+    unique_records: dict[str, dict] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        uuid = str(record.get("uuid") or "").strip()
+        if not _looks_like_uuid(uuid):
+            continue
+        unique_records[uuid] = record
+
+    ordered = sorted(
+        unique_records.values(),
+        key=lambda record: _safe_integer(
+            record.get("startTime", record.get("start_time"))
+        )
+        or 0,
+        reverse=True,
+    )
+    safe_records: list[dict] = []
+    skipped_non_hanchan = 0
+    for record in ordered:
+        mode_id = _safe_integer(record.get("modeId", record.get("mode_id")))
+        typed_record = {
+            "mode_id": mode_id,
+            "record_type": "ranked",
+        }
+        if not _is_mortal_hanchan(typed_record):
+            skipped_non_hanchan += 1
+            continue
+        player_metadata = _koromo_player_metadata(record, normalized_account_id)
+        if player_metadata is None:
+            continue
+        uuid = str(record.get("uuid") or "").strip()
+        safe_records.append(
+            {
+                "uuid": uuid,
+                "paipu_url": _record_url(uuid, normalized_account_id),
+                "start_time": _safe_integer(
+                    record.get("startTime", record.get("start_time"))
+                ),
+                "end_time": _safe_integer(
+                    record.get("endTime", record.get("end_time"))
+                ),
+                "mode_id": mode_id,
+                "record_type": "ranked",
+                **player_metadata,
+            }
+        )
+
+    selected = safe_records[:limit] if limit and limit > 0 else safe_records
+    if not selected:
+        raise ValueError(
+            "牌谱屋没有返回该 ID 的公开四人南场记录；请检查 ID、房间和公开数据范围"
+        )
+    return PaipuImport(
+        urls=[record["paipu_url"] for record in selected],
+        records=selected,
+        account_id=normalized_account_id,
+        source_format=KOROMO_RECORDS_FORMAT,
+        available_records=len(ordered),
+        skipped_non_hanchan=skipped_non_hanchan,
+    )
+
+
 def _capture_record(record: dict, account_id: int | None) -> dict:
     player = next(
         (
@@ -505,6 +634,35 @@ def read_paipu_import(path: str | Path, limit: int | None = None) -> PaipuImport
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid paipu JSON: {exc}") from exc
     if isinstance(payload, list):
+        if any(isinstance(value, dict) for value in payload):
+            shared_account_ids: set[int] | None = None
+            for record in payload:
+                if not isinstance(record, dict):
+                    continue
+                players = record.get("players")
+                if not isinstance(players, list):
+                    continue
+                record_account_ids = {
+                    int(player.get("accountId"))
+                    for player in players
+                    if isinstance(player, dict)
+                    and str(player.get("accountId") or "").isdigit()
+                }
+                shared_account_ids = (
+                    record_account_ids
+                    if shared_account_ids is None
+                    else shared_account_ids & record_account_ids
+                )
+            account_id = (
+                next(iter(shared_account_ids))
+                if shared_account_ids and len(shared_account_ids) == 1
+                else None
+            )
+            if account_id is None:
+                raise ValueError(
+                    "牌谱屋记录列表缺少目标玩家 ID；请使用桌面版的“从牌谱屋按 ID 导入”"
+                )
+            return parse_koromo_records(payload, account_id, limit=limit)
         urls = list(dict.fromkeys(str(value).strip() for value in payload if str(value).strip()))
         if limit and limit > 0:
             urls = urls[:limit]

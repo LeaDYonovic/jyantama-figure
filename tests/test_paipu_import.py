@@ -2,7 +2,7 @@ import base64
 import json
 
 from batchmortal.api import acc2match
-from batchmortal.paipu_import import read_paipu_import
+from batchmortal.paipu_import import parse_koromo_records, read_paipu_import
 
 
 def _varint(value: int) -> bytes:
@@ -285,3 +285,58 @@ def test_safe_export_can_import_more_than_one_hundred_records(tmp_path):
     assert len(complete.records) == 150
     assert len(complete.urls) == 150
     assert len(limited.records) == 100
+
+
+def test_parses_koromo_player_records_with_pt_and_viewpoint():
+    account_id = 12345678
+    records = [
+        {
+            "uuid": "260902-koromo-record-test",
+            "modeId": 12,
+            "startTime": 200,
+            "endTime": 300,
+            "players": [
+                {"accountId": 1, "nickname": "一位", "score": 51000, "gradingScore": 120},
+                {"accountId": account_id, "nickname": "目标", "level": 10401, "score": 32000, "gradingScore": 47},
+                {"accountId": 2, "nickname": "三位", "score": 18000, "gradingScore": -20},
+                {"accountId": 3, "nickname": "四位", "score": -1000, "gradingScore": -147},
+            ],
+        }
+    ]
+
+    result = parse_koromo_records(records, account_id)
+
+    assert result.account_id == account_id
+    assert result.records[0]["nickname"] == "目标"
+    assert result.records[0]["placement"] == 2
+    assert result.records[0]["final_score"] == 32000
+    assert result.records[0]["pt_delta"] == 47
+    assert result.records[0]["player_level"] == 10401
+    assert result.urls[0].endswith(
+        f"260902-koromo-record-test_a{acc2match(account_id)}"
+    )
+
+
+def test_raw_koromo_record_list_infers_shared_player(tmp_path):
+    account_id = 42
+    payload = [
+        {
+            "uuid": f"26090{day}-koromo-shared-player",
+            "modeId": 9,
+            "startTime": day,
+            "players": [
+                {"accountId": day, "score": 40000},
+                {"accountId": account_id, "score": 30000},
+                {"accountId": day + 10, "score": 20000},
+                {"accountId": day + 20, "score": 10000},
+            ],
+        }
+        for day in (1, 2)
+    ]
+    path = tmp_path / "koromo-records.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = read_paipu_import(path)
+
+    assert result.account_id == account_id
+    assert len(result.urls) == 2

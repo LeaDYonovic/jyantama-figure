@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import webbrowser
 from datetime import datetime
@@ -36,15 +37,27 @@ from batchmortal.results import (
     get_processed_uuids,
     read_result_rows,
 )
-from batchmortal.paipu_import import normalize_majsoul_paipu_input, read_paipu_import
+from batchmortal.paipu_import import (
+    PaipuImport,
+    normalize_majsoul_paipu_input,
+    read_paipu_import,
+)
+from batchmortal.koromo_browser import (
+    KOROMO_SOUTH_MODES,
+    KoromoDownloadCancelled,
+    build_koromo_player_url,
+    wait_for_koromo_bridge_export,
+    write_koromo_export,
+)
 
 
 APP_NAME = "雀魂 Mortal 牌谱分析器"
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.8.0"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA", PROJECT_ROOT))
 APP_DATA_ROOT = LOCAL_APPDATA / "MajsoulMortalDesktop"
 RESULTS_ROOT = APP_DATA_ROOT / "results"
+KOROMO_IMPORTS_ROOT = APP_DATA_ROOT / "imports"
 SETTINGS_PATH = APP_DATA_ROOT / "settings.json"
 DIRECT_RESULTS_PATH = RESULTS_ROOT / "majsoul" / "直接牌谱" / "results.xlsx"
 RANKED_ROOM_LABELS = {
@@ -367,6 +380,8 @@ class MortalDesktopApp:
         self.process: subprocess.Popen | None = None
         self.stop_file_path: Path | None = None
         self.stop_requested = False
+        self.koromo_download_running = False
+        self.koromo_cancel_event: threading.Event | None = None
         self.direct_urls: list[str] = []
         self.direct_records: list[dict] = []
         self.direct_account_id: int | None = None
@@ -421,6 +436,7 @@ class MortalDesktopApp:
         menu = tk.Menu(self.root)
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="导入牌谱 JSON / TXT…", command=self.import_paipu_file)
+        file_menu.add_command(label="从牌谱屋按 ID 导入…", command=self.open_koromo_import_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="打开分析结果 CSV / XLSX…", command=self.import_results)
         file_menu.add_command(label="导出当前图表…", command=self.export_chart)
@@ -464,15 +480,22 @@ class MortalDesktopApp:
 
         target = ttk.LabelFrame(sidebar, text="导入牌谱", padding=10)
         target.pack(fill=tk.X, pady=(0, 10))
-        ttk.Button(
+        self.import_file_button = ttk.Button(
             target,
             text="导入牌谱 JSON / TXT…",
             style="Accent.TButton",
             command=self.import_paipu_file,
-        ).pack(fill=tk.X, ipady=4)
+        )
+        self.import_file_button.pack(fill=tk.X, ipady=4)
+        self.koromo_import_button = ttk.Button(
+            target,
+            text="从牌谱屋按玩家 ID 导入…",
+            command=self.open_koromo_import_dialog,
+        )
+        self.koromo_import_button.pack(fill=tk.X, pady=(7, 0))
         ttk.Label(
             target,
-            text="选择 Tampermonkey 脚本下载的 JSON 文件",
+            text="可导入网页脚本 JSON，或查询牌谱屋公开段位场",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(5, 0))
         ttk.Label(
@@ -699,6 +722,7 @@ class MortalDesktopApp:
             "badmove": self.badmove_var.get(),
             "headless": self.headless_var.get(),
             "analysis_mode": self.analysis_mode_var.get(),
+            "koromo_player_id": str(self.settings.get("koromo_player_id", "")),
         }
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -725,6 +749,13 @@ class MortalDesktopApp:
             return 0
 
     def import_paipu_file(self):
+        if self.koromo_download_running:
+            messagebox.showinfo(
+                "牌谱屋正在导入",
+                "请等待当前牌谱屋下载完成。",
+                parent=self.root,
+            )
+            return
         filename = filedialog.askopenfilename(
             parent=self.root,
             title="导入雀魂牌谱",
@@ -743,10 +774,20 @@ class MortalDesktopApp:
             messagebox.showerror("无法导入牌谱", str(exc), parent=self.root)
             return
 
+        self._apply_paipu_import(imported, Path(filename).name)
+        if imported.contains_login_frames:
+            messagebox.showwarning(
+                "旧抓包含登录帧",
+                "已仅在本机内存中提取最近牌谱，登录帧不会写入分析结果。\n\n"
+                "这个旧 JSON 可能包含 OAuth/access token，请勿分享，用完后建议删除。",
+                parent=self.root,
+            )
+
+    def _apply_paipu_import(self, imported: PaipuImport, source_name: str):
         self.direct_urls = imported.urls
         self.direct_records = imported.records
         self.direct_account_id = imported.account_id
-        self.direct_source_name = Path(filename).name
+        self.direct_source_name = source_name
         self.direct_skipped_non_hanchan = imported.skipped_non_hanchan
         imported_types = {
             _record_type(record)
@@ -761,13 +802,186 @@ class MortalDesktopApp:
             self.analysis_mode_var.set("全部可分析")
         self._backfill_imported_result_metadata()
         self._refresh_direct_preflight()
-        if imported.contains_login_frames:
-            messagebox.showwarning(
-                "旧抓包含登录帧",
-                "已仅在本机内存中提取最近牌谱，登录帧不会写入分析结果。\n\n"
-                "这个旧 JSON 可能包含 OAuth/access token，请勿分享，用完后建议删除。",
+
+    def open_koromo_import_dialog(self):
+        if self.process is not None or self.koromo_download_running:
+            messagebox.showinfo(
+                "任务正在运行",
+                "请先等待当前导入或分析任务结束。",
                 parent=self.root,
             )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("从雀魂牌谱屋导入")
+        dialog.geometry("520x390")
+        dialog.minsize(480, 360)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        ttk.Label(
+            body,
+            text="输入牌谱屋玩家 ID，下载该玩家公开的四人南场牌谱。",
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            body,
+            text="需要安装本项目 0.8.0 用户脚本。程序会用默认浏览器打开牌谱屋，并自动接收安全 JSON。",
+            style="Subtitle.TLabel",
+            wraplength=470,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 14))
+
+        ttk.Label(body, text="牌谱屋玩家 ID").grid(row=2, column=0, sticky="w")
+        player_id_var = tk.StringVar(
+            value=str(self.settings.get("koromo_player_id", ""))
+        )
+        player_entry = ttk.Entry(body, textvariable=player_id_var)
+        player_entry.grid(row=3, column=0, sticky="ew", pady=(3, 10))
+
+        ttk.Label(body, text="房间").grid(row=4, column=0, sticky="w")
+        room_labels = {
+            "金/玉/王座之间·南（推荐）": KOROMO_SOUTH_MODES,
+            "王座之间·南": (16,),
+            "玉之间·南": (12,),
+            "金之间·南": (9,),
+        }
+        room_var = tk.StringVar(value=next(iter(room_labels)))
+        ttk.Combobox(
+            body,
+            textvariable=room_var,
+            values=tuple(room_labels),
+            state="readonly",
+        ).grid(row=5, column=0, sticky="ew", pady=(3, 10))
+
+        ttk.Label(body, text="下载范围").grid(row=6, column=0, sticky="w")
+        range_labels = {
+            "最近 100 局": 100,
+            "最近 300 局": 300,
+            "最近 500 局": 500,
+            "最近 1000 局": 1000,
+            "全部公开历史": None,
+        }
+        range_var = tk.StringVar(value="最近 100 局")
+        ttk.Combobox(
+            body,
+            textvariable=range_var,
+            values=tuple(range_labels),
+            state="readonly",
+        ).grid(row=7, column=0, sticky="ew", pady=(3, 8))
+        ttk.Label(
+            body,
+            text="牌谱屋只收录金之间及以上公开段位场，数据可能有延迟；友人场请继续用网页脚本导出。",
+            style="Subtitle.TLabel",
+            wraplength=470,
+        ).grid(row=8, column=0, sticky="w")
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=9, column=0, sticky="ew", pady=(18, 0))
+
+        def begin_import():
+            value = player_id_var.get().strip()
+            if not value.isdigit() or int(value) <= 0:
+                messagebox.showwarning(
+                    "玩家 ID 无效",
+                    "请输入牌谱屋玩家页面网址中的数字 ID。",
+                    parent=dialog,
+                )
+                return
+            account_id = int(value)
+            modes = room_labels[room_var.get()]
+            limit = range_labels[range_var.get()]
+            self.settings["koromo_player_id"] = value
+            dialog.destroy()
+            self._start_koromo_import(account_id, modes, limit)
+
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            buttons,
+            text="打开牌谱屋并导入",
+            style="Accent.TButton",
+            command=begin_import,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.bind("<Return>", lambda _event: begin_import())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        player_entry.focus_set()
+
+    def _start_koromo_import(
+        self,
+        account_id: int,
+        modes: tuple[int, ...],
+        limit: int | None,
+    ):
+        self.koromo_download_running = True
+        self.koromo_cancel_event = threading.Event()
+        self.koromo_import_button.configure(state=tk.DISABLED)
+        self.import_file_button.configure(state=tk.DISABLED)
+        self.start_button.configure(state=tk.DISABLED)
+        self.refresh_pt_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(text="取消导入", state=tk.NORMAL)
+        self.progress.start(12)
+        self.status_var.set("正在从牌谱屋下载公开牌谱…")
+        self.tabs.select(2)
+        self._log("=" * 72)
+        range_text = "全部公开历史" if limit is None else f"最近 {limit} 局"
+        self._log(
+            f"[牌谱屋] 玩家 ID {account_id}；房间 {','.join(map(str, modes))}；"
+            f"范围 {range_text}。"
+        )
+        self._log("[牌谱屋] 将打开默认浏览器；验证由牌谱屋页面正常完成。")
+
+        bridge_token = uuid.uuid4().hex
+        opened_at = time.time()
+        download_dir = Path.home() / "Downloads"
+        player_url = build_koromo_player_url(
+            account_id,
+            modes=modes,
+            limit=limit,
+            bridge_token=bridge_token,
+        )
+        webbrowser.open(player_url)
+
+        def worker():
+            try:
+                downloaded_path = wait_for_koromo_bridge_export(
+                    download_dir,
+                    bridge_token,
+                    since=opened_at,
+                    progress=lambda message: self.message_queue.put(
+                        ("koromo_progress", message)
+                    ),
+                    cancel_event=self.koromo_cancel_event,
+                )
+                imported = read_paipu_import(downloaded_path)
+                if imported.account_id != account_id:
+                    raise ValueError("下载文件中的玩家 ID 与本次查询不一致")
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                path = KOROMO_IMPORTS_ROOT / f"koromo-{account_id}-{timestamp}.json"
+                write_koromo_export(
+                    path,
+                    imported,
+                    modes=modes,
+                    requested_limit=limit,
+                )
+                self.message_queue.put(("koromo_done", (imported, path)))
+            except KoromoDownloadCancelled as exc:
+                self.message_queue.put(("koromo_cancelled", str(exc)))
+            except Exception as exc:
+                self.message_queue.put(("koromo_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_koromo_import_ui(self):
+        self.koromo_download_running = False
+        self.koromo_cancel_event = None
+        self.progress.stop()
+        self.koromo_import_button.configure(state=tk.NORMAL)
+        self.import_file_button.configure(state=tk.NORMAL)
+        self.start_button.configure(state=tk.NORMAL)
+        self.refresh_pt_button.configure(state=tk.NORMAL)
+        self.stop_button.configure(text="停止", state=tk.DISABLED)
 
     def open_direct_urls_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -1020,7 +1234,7 @@ class MortalDesktopApp:
         return command
 
     def start_analysis(self):
-        if self.process is not None:
+        if self.process is not None or self.koromo_download_running:
             return
         if not self.direct_urls:
             messagebox.showwarning(
@@ -1156,6 +1370,18 @@ class MortalDesktopApp:
         threading.Thread(target=read_output, args=(self.process,), daemon=True).start()
 
     def stop_analysis(self):
+        if getattr(self, "koromo_download_running", False):
+            if not messagebox.askyesno(
+                "取消导入",
+                "确定取消本次牌谱屋导入吗？已经下载的文件不会删除。",
+                parent=self.root,
+            ):
+                return
+            if self.koromo_cancel_event is not None:
+                self.koromo_cancel_event.set()
+            self.stop_button.configure(state=tk.DISABLED)
+            self.status_var.set("正在取消牌谱屋导入…")
+            return
         process = self.process
         if process is None or self.stop_requested:
             return
@@ -1199,6 +1425,35 @@ class MortalDesktopApp:
                 kind, payload = self.message_queue.get_nowait()
                 if kind == "log":
                     self._log(payload)
+                elif kind == "koromo_progress":
+                    self.status_var.set(payload)
+                    self._log(f"[牌谱屋] {payload}")
+                elif kind == "koromo_done":
+                    imported, path = payload
+                    self._finish_koromo_import_ui()
+                    self._apply_paipu_import(imported, path.name)
+                    self._save_settings()
+                    self._log(f"[牌谱屋] 安全牌谱文件已保存：{path}")
+                    messagebox.showinfo(
+                        "牌谱屋导入完成",
+                        f"已导入 {len(imported.urls)} 局公开四人南场牌谱。\n\n"
+                        f"安全副本已保存到：\n{path}\n\n"
+                        "已分析的牌谱会自动跳过，可直接点击“开始分析”。",
+                        parent=self.root,
+                    )
+                elif kind == "koromo_cancelled":
+                    self._finish_koromo_import_ui()
+                    self.status_var.set("牌谱屋导入已取消")
+                    self._log(f"[牌谱屋] {payload}")
+                elif kind == "koromo_error":
+                    self._finish_koromo_import_ui()
+                    self.status_var.set("牌谱屋导入失败")
+                    self._log(f"[牌谱屋] 导入失败：{payload}")
+                    messagebox.showerror(
+                        "牌谱屋导入失败",
+                        payload,
+                        parent=self.root,
+                    )
                 elif kind == "process_done":
                     success = payload == 0
                     was_stopped = self.stop_requested
@@ -1848,6 +2103,15 @@ class MortalDesktopApp:
         )
 
     def _on_close(self):
+        if self.koromo_download_running:
+            if not messagebox.askyesno(
+                "退出",
+                "牌谱屋仍在下载。退出会取消本次导入，是否继续？",
+                parent=self.root,
+            ):
+                return
+            if self.koromo_cancel_event is not None:
+                self.koromo_cancel_event.set()
         if self.process is not None:
             if not messagebox.askyesno("退出", "分析仍在运行。退出会停止当前任务，是否继续？"):
                 return

@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         雀魂：导出自己的牌谱到 Windows
 // @namespace    local.batchmortal
-// @version      0.7.0
-// @description  使用当前雀魂登录会话按段位场/友人场读取自己的四人半庄，并导出不含登录凭据的 Windows 专用 JSON。
+// @version      0.8.0
+// @description  导出自己的雀魂牌谱，并与 Windows 桌面版配合从牌谱屋按玩家 ID 导入公开牌谱。
 // @match        https://game.maj-soul.com/*
 // @match        https://game.mahjongsoul.com/*
 // @match        https://mahjongsoul.game.yo-star.com/*
+// @match        https://amae-koromo.sapk.ch/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -13,7 +14,204 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.7.0";
+  const VERSION = "0.8.0";
+
+  function runKoromoBridge() {
+    const bridgeMatch = location.hash.match(/(?:^#|[&#])batchmortal=([0-9a-f]+)/i);
+    const playerMatch = location.pathname.match(/^\/player\/(\d+)\/([0-9.]+)/);
+    if (!bridgeMatch || !playerMatch) return;
+
+    const bridgeToken = bridgeMatch[1].toLowerCase();
+    const accountId = Number(playerMatch[1]);
+    const selectedModes = new Set(
+      playerMatch[2].split(".").map(Number).filter(Number.isFinite),
+    );
+    const requestedLimit = Number(new URLSearchParams(location.search).get("limit")) || null;
+    const records = new Map();
+    let selectedTotal = null;
+    let recordResponses = 0;
+    let lastRecordAt = 0;
+    let finished = false;
+    let statusElement = null;
+    let downloadButton = null;
+    let preparedPayload = null;
+
+    const setBridgeStatus = (message, isError = false) => {
+      if (!statusElement) return;
+      statusElement.textContent = message;
+      statusElement.style.color = isError ? "#ffb4ab" : "#d9e4f2";
+    };
+
+    const looksLikeKoromoRecords = (data) => Array.isArray(data) && data.every(
+      (value) => !value || (typeof value === "object" && (value.uuid || value._id)),
+    );
+
+    const sameSelectedModes = (url) => {
+      try {
+        const apiModes = new Set(
+          (new URL(url).searchParams.get("mode") || "")
+            .split(/[,.]/).map(Number).filter(Number.isFinite),
+        );
+        return apiModes.size === selectedModes.size
+          && [...selectedModes].every((mode) => apiModes.has(mode));
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const rememberResponse = (data, url) => {
+      if (looksLikeKoromoRecords(data)) {
+        const matching = data.filter(
+          (record) => record?.uuid && Array.isArray(record.players) && selectedModes.has(Number(record.modeId)),
+        );
+        if (matching.length || /player_records\//.test(url)) {
+          for (const record of matching) records.set(String(record.uuid), record);
+          recordResponses += 1;
+          lastRecordAt = Date.now();
+          setBridgeStatus(`已从牌谱屋读取 ${records.size} 条公开记录……`);
+        }
+      } else if (
+        data && typeof data === "object" && Number.isFinite(Number(data.count))
+        && /player_stats\//.test(url) && sameSelectedModes(url)
+      ) {
+        selectedTotal = Number(data.count);
+      }
+    };
+
+    const nativeFetch = window.fetch;
+    window.fetch = async function patchedKoromoFetch(...args) {
+      const response = await nativeFetch.apply(this, args);
+      try {
+        const url = String(response.url || args[0]?.url || args[0] || "");
+        response.clone().json().then((data) => rememberResponse(data, url)).catch(() => {});
+      } catch (_) {}
+      return response;
+    };
+
+    const encodeAccountId = (value) => (
+      1358437n + ((7n * BigInt(value) + 1117113n) ^ 86216345n)
+    ).toString();
+
+    const playerData = (record) => {
+      const indexed = (record.players || []).map((player, index) => ({ player, index }));
+      const target = indexed.find(({ player }) => Number(player.accountId) === accountId);
+      if (!target) return null;
+      const ranked = [...indexed].sort((left, right) => (
+        Number(right.player.score || 0) + 5 - right.index
+      ) - (
+        Number(left.player.score || 0) + 5 - left.index
+      ));
+      return {
+        player: target.player,
+        placement: ranked.findIndex(({ index }) => index === target.index) + 1,
+      };
+    };
+
+    const numberOrBlank = (value) => (
+      value === null || value === undefined || value === "" ? "" : Number(value)
+    );
+
+    const buildSafePayload = () => {
+      const selected = [...records.values()]
+        .filter((record) => [9, 12, 16].includes(Number(record.modeId)))
+        .sort((left, right) => Number(right.startTime || 0) - Number(left.startTime || 0));
+      const limited = requestedLimit ? selected.slice(0, requestedLimit) : selected;
+      const safeRecords = limited.map((record) => {
+        const target = playerData(record);
+        if (!target) return null;
+        return {
+          uuid: String(record.uuid),
+          start_time: Number(record.startTime || 0),
+          end_time: Number(record.endTime || 0),
+          mode_id: Number(record.modeId || 0),
+          record_type: "ranked",
+          placement: target.placement,
+          final_score: numberOrBlank(target.player.score),
+          pt_delta: numberOrBlank(target.player.gradingScore),
+          player_level: numberOrBlank(target.player.level),
+          player_level_score: "",
+          paipu_url: `https://game.maj-soul.com/1/?paipu=${record.uuid}_a${encodeAccountId(accountId)}`,
+        };
+      }).filter(Boolean);
+      return {
+        schema: "batchmortal-majsoul-links-v1",
+        version: VERSION,
+        exported_at: new Date().toISOString(),
+        source_origin: location.origin,
+        scope: requestedLimit ? `latest-${requestedLimit}` : "all",
+        modes: [...selectedModes],
+        account_id: accountId,
+        count: safeRecords.length,
+        records: safeRecords,
+      };
+    };
+
+    const downloadBridgeFile = () => {
+      if (!preparedPayload) return;
+      const blob = new Blob([JSON.stringify(preparedPayload, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `koromo-bridge-${bridgeToken}.json`;
+      document.documentElement.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setBridgeStatus(`已生成 ${preparedPayload.count} 局安全 JSON，Windows 正在接收。`);
+    };
+
+    const finish = () => {
+      if (finished || !records.size) return;
+      preparedPayload = buildSafePayload();
+      if (!preparedPayload.records.length) {
+        setBridgeStatus("记录中没有该玩家可用的四人南场牌谱。", true);
+        return;
+      }
+      finished = true;
+      if (downloadButton) downloadButton.disabled = false;
+      downloadBridgeFile();
+    };
+
+    const mountBridgeUi = () => {
+      const host = document.createElement("div");
+      host.style.cssText = "position:fixed;right:16px;top:72px;z-index:2147483647";
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = `
+        <style>
+          .panel{width:300px;padding:13px;color:#fff;background:rgba(20,28,40,.95);border-radius:9px;box-shadow:0 8px 28px rgba(0,0,0,.35);font:13px/1.5 "Microsoft YaHei",sans-serif}
+          h3{margin:0 0 7px;font-size:15px}.status{min-height:42px;padding:7px;background:rgba(255,255,255,.08);border-radius:6px}
+          button{width:100%;margin-top:8px;padding:7px;border:0;border-radius:6px;background:#58a56b;color:#fff;cursor:pointer}button:disabled{opacity:.5}.note{margin-top:7px;color:#9fb0c4;font-size:11px}
+        </style>
+        <section class="panel"><h3>发送牌谱到 Windows</h3><div class="status">等待牌谱屋完成验证并返回公开记录……</div><button disabled>再次下载安全 JSON</button><div class="note">不读取或保存 CAP 令牌、Cookie、登录信息。</div></section>`;
+      document.documentElement.appendChild(host);
+      statusElement = root.querySelector(".status");
+      downloadButton = root.querySelector("button");
+      downloadButton.addEventListener("click", downloadBridgeFile);
+    };
+
+    if (document.documentElement) mountBridgeUi();
+    else document.addEventListener("DOMContentLoaded", mountBridgeUi, { once: true });
+
+    setInterval(() => {
+      if (finished) return;
+      if (!requestedLimit && records.size) {
+        window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+      }
+      const quiet = lastRecordAt && Date.now() - lastRecordAt > 2500;
+      if (requestedLimit && recordResponses && records.size && quiet) finish();
+      if (!requestedLimit && selectedTotal !== null && records.size >= selectedTotal) finish();
+      if (recordResponses && !records.size && quiet) {
+        setBridgeStatus("牌谱屋没有返回这个 ID/房间的公开记录。", true);
+      }
+    }, 700);
+  }
+
+  if (location.hostname === "amae-koromo.sapk.ch") {
+    runKoromoBridge();
+    return;
+  }
   const RECENT_COUNT = 100;
   const PAGE_COUNT = 10;
   const LEGACY_PAGE_COUNT = 100;
